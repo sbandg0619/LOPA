@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,6 +19,7 @@ from recommender import (
 )
 
 ROLES = ["TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY"]
+
 
 # -------------------------
 # .env loader (profile aware)
@@ -46,12 +47,13 @@ def _load_env_candidates() -> List[str]:
 
 
 _LOADED_ENVS = _load_env_candidates()
-PROFILE = (os.getenv("APP_PROFILE") or "public").strip().lower()
+PROFILE = (os.getenv("APP_PROFILE") or "personal").strip().lower()
 
 DEFAULT_DB_BY_PROFILE = "lol_graph_public.db" if PROFILE == "public" else "lol_graph_personal.db"
 DEFAULT_DB = os.getenv("LOPA_DB_DEFAULT") or DEFAULT_DB_BY_PROFILE
 
-app = FastAPI(title="LOPA API", version="0.2.0")
+
+app = FastAPI(title="LOPA API", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -62,7 +64,7 @@ app.add_middleware(
 )
 
 # -------------------------
-# helpers
+# Normalizers (API-side)
 # -------------------------
 _ROLE_MAP = {
     "TOP": "TOP",
@@ -104,64 +106,12 @@ def normalize_tier(tier: str) -> str:
     return t
 
 
-def _resolve_db_path(db_path: Optional[str]) -> str:
-    """
-    Render 환경에서 CWD가 바뀌거나, 상대경로가 꼬여도 DB를 찾을 수 있게:
-    1) 절대경로면 그대로
-    2) 현재 작업폴더(CWD)
-    3) api_server.py가 있는 폴더
-    4) 레포 루트(= api_server.py 폴더의 상위들 중 git 기준) 대신 간단히: script_dir
-    """
-    name = (db_path or "").strip() or DEFAULT_DB
-    p = Path(name)
-
-    if p.is_absolute():
-        return str(p)
-
-    # 1) cwd
-    cand1 = Path.cwd() / p
-    if cand1.exists():
-        return str(cand1)
-
-    # 2) script dir
-    here = Path(__file__).resolve().parent
-    cand2 = here / p
-    if cand2.exists():
-        return str(cand2)
-
-    # 3) repo root 추정: here의 부모(대개 동일 폴더일 확률 높음)
-    cand3 = here.parent / p
-    if cand3.exists():
-        return str(cand3)
-
-    # 못 찾으면 "기본적으로 cwd 기준 경로" 반환 (에러 메시지에 쓰기 위함)
-    return str(cand1)
-
-
-def _table_exists(con: sqlite3.Connection, name: str) -> bool:
-    row = con.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-        (name,),
-    ).fetchone()
-    return row is not None
-
-
-def _db_connect_must_exist(db_path: str) -> sqlite3.Connection:
-    resolved = _resolve_db_path(db_path)
-    if not os.path.exists(resolved):
-        raise FileNotFoundError(f"DB not found: {db_path} (resolved: {resolved})")
-
-    # ✅ 중요한 포인트:
-    # sqlite3.connect는 파일이 없으면 빈 DB를 새로 만들어버리는데,
-    # 위에서 exists를 체크해서 그 케이스를 완전히 차단.
-    con = sqlite3.connect(resolved, check_same_thread=False)
-    return con
-
-
-def _require_core_tables(con: sqlite3.Connection) -> None:
-    # 공개 데모/심사용 최소 테이블
-    if not _table_exists(con, "agg_champ_role"):
-        raise RuntimeError("DB is missing required table: agg_champ_role")
+def _db_connect(db_path: str) -> sqlite3.Connection:
+    if not db_path:
+        db_path = DEFAULT_DB
+    if not os.path.exists(db_path):
+        raise FileNotFoundError(f"DB not found: {db_path}")
+    return sqlite3.connect(db_path, check_same_thread=False)
 
 
 # -------------------------
@@ -173,22 +123,24 @@ class RecommendRequest(BaseModel):
     tier: str = Field(default="ALL")
     my_role: str = Field(default="MIDDLE")
 
-    # champ_pool: 내 챔프폭 모드일 때만 사용.
-    # 전체 후보 모드에서는 빈 배열로 보내도 OK (서버에서 후보를 뽑음)
-    champ_pool: List[int] = Field(default_factory=list)
+    # ✅ 후보 모드:
+    # - use_champ_pool=True  -> champ_pool 후보만 추천
+    # - use_champ_pool=False -> "전체 후보"에서 pick_rate 필터로 후보 생성
+    use_champ_pool: bool = Field(default=True)
 
+    champ_pool: List[int] = Field(default_factory=list)
     bans: List[int] = Field(default_factory=list)
     ally_picks_by_role: Dict[str, List[int]] = Field(default_factory=dict)
     enemy_picks: List[int] = Field(default_factory=list)
 
-    # legacy
+    # (호환용) 기존 min_games도 남겨둠
     min_games: int = Field(default=30, ge=1, le=10000)
 
-    # ✅ new: pickrate filter (0.005 = 0.5%)
+    # ✅ NEW: pick rate 기준 (0.005 = 0.5%)
     min_pick_rate: float = Field(default=0.005, ge=0.0, le=1.0)
 
-    # 후보 상한(전체 후보 모드에서)
-    max_candidates: int = Field(default=400, ge=10, le=3000)
+    # ✅ NEW: 전체 후보 생성 시 후보 상한
+    max_candidates: int = Field(default=400, ge=10, le=5000)
 
     top_n: int = Field(default=10, ge=1, le=50)
 
@@ -204,15 +156,14 @@ class RecommendResponse(BaseModel):
 # -------------------------
 @app.get("/health")
 def health():
-    return {"ok": True, "profile": PROFILE, "default_db": DEFAULT_DB, "loaded_envs": _LOADED_ENVS}
+    return {"ok": True, "profile": PROFILE, "default_db": DEFAULT_DB}
 
 
 @app.get("/meta")
 def meta(db_path: str = DEFAULT_DB):
     try:
-        con = _db_connect_must_exist(db_path)
+        con = _db_connect(db_path)
         try:
-            _require_core_tables(con)
             latest = get_latest_patch(con)
             patches = get_available_patches(con)
         finally:
@@ -220,6 +171,11 @@ def meta(db_path: str = DEFAULT_DB):
         return {"ok": True, "latest_patch": latest, "patches": patches, "db_path": db_path}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/env")
+def env_debug():
+    return {"ok": True, "profile": PROFILE, "loaded_envs": _LOADED_ENVS, "default_db": DEFAULT_DB}
 
 
 @app.post("/recommend", response_model=RecommendResponse)
@@ -241,18 +197,11 @@ def recommend(req: RecommendRequest):
     enemy = [int(x) for x in (req.enemy_picks or []) if int(x) != 0]
     champ_pool = [int(x) for x in (req.champ_pool or []) if int(x) != 0]
 
-    # db 검증은 API에서 먼저(빈 DB 생성/테이블 누락 방지)
-    try:
-        con = _db_connect_must_exist(req.db_path)
-        try:
-            _require_core_tables(con)
-        finally:
-            con.close()
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    if req.use_champ_pool and not champ_pool:
+        raise HTTPException(status_code=400, detail="champ_pool is empty (use_champ_pool=true)")
 
     try:
-        recs, reason = recommend_champions(
+        recs, meta2 = recommend_champions(
             db_path=req.db_path,
             patch=patch,
             tier=tier,
@@ -261,10 +210,11 @@ def recommend(req: RecommendRequest):
             bans=bans,
             ally_picks_by_role=ally,
             enemy_picks=enemy,
-            min_games=req.min_games,
+            min_games=req.min_games,               # 호환용
             min_pick_rate=req.min_pick_rate,
-            top_n=req.top_n,
+            use_champ_pool=req.use_champ_pool,
             max_candidates=req.max_candidates,
+            top_n=req.top_n,
         )
         return {
             "ok": True,
@@ -278,8 +228,12 @@ def recommend(req: RecommendRequest):
                 "min_pick_rate": req.min_pick_rate,
                 "top_n": req.top_n,
                 "max_candidates": req.max_candidates,
-                "reason": reason,
+                "use_champ_pool": req.use_champ_pool,
+                "reason": meta2.get("reason", "ok"),
             },
         }
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        # ✅ 여기로 오면 Render 응답 detail에 파이썬 예외 메시지가 그대로 뜸
         raise HTTPException(status_code=500, detail=str(e))
