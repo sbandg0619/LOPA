@@ -100,15 +100,11 @@ function sanitizeAlly(obj) {
 }
 
 /**
- * ✅ pick_rate 표시 유틸
- * - API가 pick_rate(0~1) / pick_rate_pct(0~100) / pickRate / pickRatePct 등으로 줄 수 있어서 모두 처리
- * - 0~1이면 %로 변환
- * - 그래도 없으면 (n/a)
+ * pick_rate 표시 유틸
  */
 function formatPickRate(rec) {
   if (!rec || typeof rec !== "object") return "(n/a)";
 
-  // 다양한 키 후보를 우선순위로 탐색
   const candidates = [
     rec.pick_rate,
     rec.pick_rate_pct,
@@ -116,7 +112,7 @@ function formatPickRate(rec) {
     rec.pickRatePct,
     rec.pick_rate_percent,
     rec.pickRatePercent,
-    rec.pr, // 혹시 축약
+    rec.pr,
   ];
 
   let v = null;
@@ -129,7 +125,6 @@ function formatPickRate(rec) {
     }
   }
 
-  // (옵션) games/total_games(혹은 total) 기반으로 계산 가능하면 계산
   if (v === null) {
     const g = Number(rec.games);
     const tg =
@@ -139,19 +134,15 @@ function formatPickRate(rec) {
       Number(rec.roleGamesTotal);
 
     if (Number.isFinite(g) && Number.isFinite(tg) && tg > 0) {
-      v = g / tg; // 0~1
+      v = g / tg;
     }
   }
 
   if (v === null) return "(n/a)";
 
-  // 0~1이면 비율로 보고 % 변환
   let pct = v;
   if (pct >= 0 && pct <= 1.0000001) pct = pct * 100;
-
-  // 너무 큰 수는 그대로 두되 표시 안정화
   if (!Number.isFinite(pct)) return "(n/a)";
-
   return pct.toFixed(2);
 }
 
@@ -247,6 +238,12 @@ function ScoreBar({ value }) {
   );
 }
 
+function isLocalHost() {
+  if (typeof window === "undefined") return false;
+  const h = String(window.location?.hostname || "");
+  return h === "localhost" || h === "127.0.0.1";
+}
+
 export default function RecommendPage() {
   const [bridgeBase, setBridgeBase] = useState("");
   const [bridgeToken, setBridgeToken] = useState("");
@@ -258,10 +255,9 @@ export default function RecommendPage() {
 
   const [autoPull, setAutoPull] = useState(true);
 
-  const DEFAULT_DB_PATH =
-    typeof window !== "undefined" && (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1")
-      ? "lol_graph_personal.db"
-      : "lol_graph_public.db";
+  const LOCAL = typeof window !== "undefined" ? isLocalHost() : false;
+
+  const DEFAULT_DB_PATH = LOCAL ? "lol_graph_personal.db" : "lol_graph_public.db";
 
   const [dbPath, setDbPath] = useState(DEFAULT_DB_PATH);
   const [patch, setPatch] = useState("ALL");
@@ -276,7 +272,7 @@ export default function RecommendPage() {
   const [availablePatches, setAvailablePatches] = useState([]);
   const [latestPatch, setLatestPatch] = useState("");
 
-  const [champPoolText, setChampPoolText] = useState("103,7,61");
+  const [champPoolText, setChampPoolText] = useState("");
   const [bansText, setBansText] = useState("");
   const [enemyText, setEnemyText] = useState("");
 
@@ -321,7 +317,13 @@ export default function RecommendPage() {
     const p = loadRecommendPrefs();
     if (!p) return;
 
-    if (p.dbPath) setDbPath(p.dbPath);
+    // 배포 환경에서는 public로 강제(개인 db_path가 섞여 meta/recommend 깨지는 것 방지)
+    if (LOCAL) {
+      if (p.dbPath) setDbPath(p.dbPath);
+    } else {
+      setDbPath("lol_graph_public.db");
+    }
+
     if (p.patch) setPatch(p.patch);
     if (p.tier) setTier(p.tier);
     if (p.myRole) setMyRole(p.myRole);
@@ -334,10 +336,11 @@ export default function RecommendPage() {
     setAllyByRole(ally2);
     setAllyJsonText(JSON.stringify(ally2));
 
+    // min_games는 항상 1 이상
     const mg = Math.max(1, Number(p.minGames) || 1);
     setMinGames(mg);
 
-    setTopN(Number(p.topN) || 10);
+    setTopN(Math.max(1, Number(p.topN) || 10));
 
     setAutoPull(Boolean(p.autoPull));
     setShowAdvanced(Boolean(p.showAdvanced));
@@ -345,8 +348,13 @@ export default function RecommendPage() {
     setShowRawState(Boolean(p.showRawState));
 
     if (p.candidateMode) setCandidateMode(String(p.candidateMode));
-    if (typeof p.minPickRatePct !== "undefined") setMinPickRatePct(Number(p.minPickRatePct) || 0.5);
-  }, []);
+
+    // 0도 유효한 값이므로 || 로 처리하지 않음
+    if (typeof p.minPickRatePct !== "undefined") {
+      const n = Number(p.minPickRatePct);
+      setMinPickRatePct(Number.isFinite(n) ? n : 0.5);
+    }
+  }, [LOCAL]);
 
   const saveTimerRef = useRef(null);
   useEffect(() => {
@@ -355,7 +363,7 @@ export default function RecommendPage() {
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     saveTimerRef.current = setTimeout(() => {
       saveRecommendPrefs({
-        dbPath,
+        dbPath: LOCAL ? dbPath : "lol_graph_public.db",
         patch,
         tier,
         myRole,
@@ -378,6 +386,7 @@ export default function RecommendPage() {
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     };
   }, [
+    LOCAL,
     dbPath,
     patch,
     tier,
@@ -582,7 +591,7 @@ export default function RecommendPage() {
     setMetaErr("");
     setMetaLoading(true);
     try {
-      const j = await apiMeta(dbPath);
+      const j = await apiMeta(LOCAL ? dbPath : "lol_graph_public.db");
       const patches = Array.isArray(j?.patches) ? j.patches : [];
       const latest = String(j?.latest_patch || "");
       setAvailablePatches(patches);
@@ -603,7 +612,7 @@ export default function RecommendPage() {
   useEffect(() => {
     loadMeta({ silent: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dbPath]);
+  }, [dbPath, LOCAL]);
 
   const champPoolIds = useMemo(() => parseIds(champPoolText), [champPoolText]);
   const bansIds = useMemo(() => parseIds(bansText), [bansText]);
@@ -663,16 +672,21 @@ export default function RecommendPage() {
 
     const minPickRate = Math.max(0, Number(minPickRatePct) || 0) / 100.0;
 
+    // ✅ 핵심: ALL 모드면 champ_pool 키 자체를 보내지 않음(omit)
     const body = {
-      db_path: dbPath,
+      db_path: LOCAL ? dbPath : "lol_graph_public.db",
       patch,
       tier,
       my_role: myRole,
+
       use_champ_pool: candidateMode === "POOL",
-      champ_pool: candidateMode === "POOL" ? champPoolIds : [],
+
+      ...(candidateMode === "POOL" ? { champ_pool: champPoolIds } : {}),
+
       bans: bansIds,
       enemy_picks: enemyIds,
       ally_picks_by_role: allyByRole,
+
       min_games: Math.max(1, Number(minGames) || 1),
       min_pick_rate: minPickRate,
       top_n: Math.max(1, Number(topN) || 10),
@@ -728,7 +742,7 @@ export default function RecommendPage() {
 
           <div className="kv">
             <div className="k">db_path</div>
-            <div className="v">{dbPath}</div>
+            <div className="v">{LOCAL ? dbPath : "lol_graph_public.db"}</div>
 
             <div className="k">latest_patch</div>
             <div className="v">{latestPatch || "(unknown)"}</div>
@@ -842,7 +856,7 @@ export default function RecommendPage() {
               setCandidateMode("ALL");
               setMinPickRatePct(0.5);
 
-              setChampPoolText("103,7,61");
+              setChampPoolText("");
               setBansText("");
               setEnemyText("");
 
@@ -878,7 +892,17 @@ export default function RecommendPage() {
         <div className="row">
           <div style={{ flex: 1, minWidth: 260 }}>
             <div className="p" style={{ fontWeight: 800 }}>db_path</div>
-            <input className="input" value={dbPath} onChange={(e) => setDbPath(e.target.value)} />
+            <input
+              className="input"
+              value={LOCAL ? dbPath : "lol_graph_public.db"}
+              disabled={!LOCAL}
+              onChange={(e) => setDbPath(e.target.value)}
+            />
+            {!LOCAL ? (
+              <div className="p" style={{ marginTop: 6, fontSize: 12, opacity: 0.9 }}>
+                배포 환경에서는 public DB만 사용합니다.
+              </div>
+            ) : null}
           </div>
 
           <div style={{ width: 170 }}>
@@ -1151,7 +1175,13 @@ export default function RecommendPage() {
           <div className="row">
             <div style={{ width: 180 }}>
               <div className="p" style={{ fontWeight: 800 }}>min_games</div>
-              <input className="input" type="number" min="1" value={minGames} onChange={(e) => setMinGames(e.target.value)} />
+              <input
+                className="input"
+                type="number"
+                min="1"
+                value={minGames}
+                onChange={(e) => setMinGames(e.target.value)}
+              />
               <div className="p" style={{ marginTop: 6, fontSize: 12, opacity: 0.9 }}>
                 백엔드 검증 때문에 1 이상만 전송됩니다.
               </div>
