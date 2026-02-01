@@ -99,6 +99,62 @@ function sanitizeAlly(obj) {
   return out;
 }
 
+/**
+ * ✅ pick_rate 표시 유틸
+ * - API가 pick_rate(0~1) / pick_rate_pct(0~100) / pickRate / pickRatePct 등으로 줄 수 있어서 모두 처리
+ * - 0~1이면 %로 변환
+ * - 그래도 없으면 (n/a)
+ */
+function formatPickRate(rec) {
+  if (!rec || typeof rec !== "object") return "(n/a)";
+
+  // 다양한 키 후보를 우선순위로 탐색
+  const candidates = [
+    rec.pick_rate,
+    rec.pick_rate_pct,
+    rec.pickRate,
+    rec.pickRatePct,
+    rec.pick_rate_percent,
+    rec.pickRatePercent,
+    rec.pr, // 혹시 축약
+  ];
+
+  let v = null;
+  for (const x of candidates) {
+    if (x === null || typeof x === "undefined") continue;
+    const n = Number(x);
+    if (Number.isFinite(n)) {
+      v = n;
+      break;
+    }
+  }
+
+  // (옵션) games/total_games(혹은 total) 기반으로 계산 가능하면 계산
+  if (v === null) {
+    const g = Number(rec.games);
+    const tg =
+      Number(rec.total_games) ||
+      Number(rec.totalGames) ||
+      Number(rec.role_games_total) ||
+      Number(rec.roleGamesTotal);
+
+    if (Number.isFinite(g) && Number.isFinite(tg) && tg > 0) {
+      v = g / tg; // 0~1
+    }
+  }
+
+  if (v === null) return "(n/a)";
+
+  // 0~1이면 비율로 보고 % 변환
+  let pct = v;
+  if (pct >= 0 && pct <= 1.0000001) pct = pct * 100;
+
+  // 너무 큰 수는 그대로 두되 표시 안정화
+  if (!Number.isFinite(pct)) return "(n/a)";
+
+  return pct.toFixed(2);
+}
+
 function Chip({ label, onRemove }) {
   return (
     <span
@@ -202,7 +258,6 @@ export default function RecommendPage() {
 
   const [autoPull, setAutoPull] = useState(true);
 
-  // recommend inputs
   const DEFAULT_DB_PATH =
     typeof window !== "undefined" && (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1")
       ? "lol_graph_personal.db"
@@ -213,30 +268,22 @@ export default function RecommendPage() {
   const [tier, setTier] = useState("ALL");
   const [myRole, setMyRole] = useState("MIDDLE");
 
-  // 후보 모드: ALL(전체 후보) / POOL(내 챔프폭)
   const [candidateMode, setCandidateMode] = useState("ALL");
-
-  // 픽률 필터 (0.5% 기본)
   const [minPickRatePct, setMinPickRatePct] = useState(0.5);
 
-  // meta
   const [metaLoading, setMetaLoading] = useState(false);
   const [metaErr, setMetaErr] = useState("");
   const [availablePatches, setAvailablePatches] = useState([]);
   const [latestPatch, setLatestPatch] = useState("");
 
-  // raw text (IDs)
   const [champPoolText, setChampPoolText] = useState("103,7,61");
   const [bansText, setBansText] = useState("");
   const [enemyText, setEnemyText] = useState("");
 
-  // ✅ 기본값: Ally는 완전 비움
   const [allyByRole, setAllyByRole] = useState(() => emptyAlly());
   const [allyJsonText, setAllyJsonText] = useState(() => JSON.stringify(emptyAlly()));
 
-  // ✅ 백엔드가 min_games >= 1을 강제하는 상태라면, 기본/전송 모두 1 이상으로 고정
   const [minGames, setMinGames] = useState(1);
-
   const [topN, setTopN] = useState(10);
 
   const [recs, setRecs] = useState([]);
@@ -262,11 +309,9 @@ export default function RecommendPage() {
     return out;
   }, [nameToId]);
 
-  // ---- polling guards ----
   const healthInFlightRef = useRef(false);
   const stateInFlightRef = useRef(false);
 
-  // ---- prefs: load once ----
   const prefsLoadedRef = useRef(false);
 
   useEffect(() => {
@@ -285,12 +330,10 @@ export default function RecommendPage() {
     if (typeof p.bansText === "string") setBansText(p.bansText);
     if (typeof p.enemyText === "string") setEnemyText(p.enemyText);
 
-    // ✅ 저장된 값이 있으면 그걸 쓰되, 없으면 빈 값 유지
     const ally2 = sanitizeAlly(p.allyByRole || emptyAlly());
     setAllyByRole(ally2);
     setAllyJsonText(JSON.stringify(ally2));
 
-    // ✅ 이전 저장값이 0이면 1로 보정
     const mg = Math.max(1, Number(p.minGames) || 1);
     setMinGames(mg);
 
@@ -305,7 +348,6 @@ export default function RecommendPage() {
     if (typeof p.minPickRatePct !== "undefined") setMinPickRatePct(Number(p.minPickRatePct) || 0.5);
   }, []);
 
-  // ---- prefs: save debounce ----
   const saveTimerRef = useRef(null);
   useEffect(() => {
     if (!prefsLoadedRef.current) return;
@@ -354,7 +396,6 @@ export default function RecommendPage() {
     showRawState,
   ]);
 
-  // ---- bridge config reload ----
   function reloadBridgeConfig({ showMsg = false } = {}) {
     let base = "";
     let token = "";
@@ -527,7 +568,6 @@ export default function RecommendPage() {
     };
   }, [effectiveBase, effectiveToken, autoPull]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // allyJsonText init 1회 반영
   useEffect(() => {
     const obj = safeJsonParse(allyJsonText);
     setAllyByRole(sanitizeAlly(obj));
@@ -538,7 +578,6 @@ export default function RecommendPage() {
     setAllyJsonText(JSON.stringify(allyByRole));
   }, [allyByRole]);
 
-  // /meta 로드
   async function loadMeta({ silent = false } = {}) {
     setMetaErr("");
     setMetaLoading(true);
@@ -566,7 +605,6 @@ export default function RecommendPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dbPath]);
 
-  // ---- derived arrays for chips ----
   const champPoolIds = useMemo(() => parseIds(champPoolText), [champPoolText]);
   const bansIds = useMemo(() => parseIds(bansText), [bansText]);
   const enemyIds = useMemo(() => parseIds(enemyText), [enemyText]);
@@ -582,7 +620,6 @@ export default function RecommendPage() {
     setter(idsToText(ids));
   }
 
-  // ---- name add helpers ----
   const [poolName, setPoolName] = useState("");
   const [nameHints, setNameHints] = useState({ kind: "", cands: [] });
 
@@ -636,7 +673,6 @@ export default function RecommendPage() {
       bans: bansIds,
       enemy_picks: enemyIds,
       ally_picks_by_role: allyByRole,
-      // ✅ 백엔드 검증 대응: 무조건 1 이상
       min_games: Math.max(1, Number(minGames) || 1),
       min_pick_rate: minPickRate,
       top_n: Math.max(1, Number(topN) || 10),
@@ -727,7 +763,7 @@ export default function RecommendPage() {
                 <Metric k="base_lb" v={best.base_lb} />
                 <Metric k="base_wr" v={best.base_wr} />
                 <Metric k="games" v={best.games} />
-                <Metric k="pick_rate(%)" v={best.pick_rate ?? "(n/a)"} />
+                <Metric k="pick_rate(%)" v={formatPickRate(best)} />
               </div>
             </>
           ) : (
@@ -760,7 +796,7 @@ export default function RecommendPage() {
                       <Metric k="base_lb" v={r.base_lb} />
                       <Metric k="base_wr" v={r.base_wr} />
                       <Metric k="games" v={r.games} />
-                      <Metric k="pick_rate(%)" v={r.pick_rate ?? "(n/a)"} />
+                      <Metric k="pick_rate(%)" v={formatPickRate(r)} />
                       <Metric k="counter" v={r.counter_delta} />
                       <Metric k="c_samples" v={r.counter_samples} />
                       <Metric k="synergy" v={r.synergy_delta} />
@@ -810,7 +846,6 @@ export default function RecommendPage() {
               setBansText("");
               setEnemyText("");
 
-              // ✅ Reset도 빈 Ally로 고정 (리신 재등장 금지)
               const ally0 = emptyAlly();
               setAllyByRole(ally0);
               setAllyJsonText(JSON.stringify(ally0));
@@ -879,7 +914,6 @@ export default function RecommendPage() {
 
         <div style={{ height: 12 }} />
 
-        {/* Candidate mode */}
         <div className="card">
           <div className="h2">Candidate Mode</div>
           <div className="row" style={{ marginTop: 8 }}>
@@ -919,7 +953,6 @@ export default function RecommendPage() {
 
         <div style={{ height: 12 }} />
 
-        {/* Champ Pool (POOL 모드에서만 노출) */}
         {candidateMode === "POOL" ? (
           <div className="card">
             <div className="h2">Champ Pool</div>
@@ -984,7 +1017,6 @@ export default function RecommendPage() {
 
         <div style={{ height: 12 }} />
 
-        {/* Auto Input (Bridge) */}
         <div className="card">
           <div className="h2">Auto Input (Bridge)</div>
 
@@ -1021,7 +1053,6 @@ export default function RecommendPage() {
 
         <div style={{ height: 12 }} />
 
-        {/* Bans + Enemy */}
         <div className="row">
           <div className="card" style={{ flex: 1, minWidth: 320 }}>
             <div className="h2">Bans</div>
@@ -1056,7 +1087,6 @@ export default function RecommendPage() {
 
         <div style={{ height: 12 }} />
 
-        {/* Ally */}
         <div className="card">
           <div className="h2">Ally Picks (by role)</div>
           <div className="p">브릿지 Pull로 들어오면 자동 반영되며, 그대로 저장됩니다.</div>
@@ -1115,20 +1145,13 @@ export default function RecommendPage() {
 
         <div style={{ height: 12 }} />
 
-        {/* Options */}
         <div className="card">
           <div className="h2">Options</div>
 
           <div className="row">
             <div style={{ width: 180 }}>
               <div className="p" style={{ fontWeight: 800 }}>min_games</div>
-              <input
-                className="input"
-                type="number"
-                min="1"
-                value={minGames}
-                onChange={(e) => setMinGames(e.target.value)}
-              />
+              <input className="input" type="number" min="1" value={minGames} onChange={(e) => setMinGames(e.target.value)} />
               <div className="p" style={{ marginTop: 6, fontSize: 12, opacity: 0.9 }}>
                 백엔드 검증 때문에 1 이상만 전송됩니다.
               </div>
