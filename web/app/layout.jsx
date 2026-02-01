@@ -25,7 +25,7 @@ export default function RootLayout({ children }) {
               <Link className="navLink" href="/recommend">Recommend</Link>
               <Link className="navLink" href="/connect">Connect</Link>
 
-              {/* ✅ 추가: Meta */}
+              {/* ✅ 추가 */}
               <Link className="navLink" href="/meta">Meta</Link>
 
               <Link className="navLink" href="/legal">Legal</Link>
