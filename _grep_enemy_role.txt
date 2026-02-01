@@ -1,0 +1,495 @@
+api_server.py:21:ROLES = ["TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY"]
+api_server.py:69:_ROLE_MAP = {
+api_server.py:84:def normalize_role(role: str) -> str:
+api_server.py:85:    r = (role or "").strip().upper()
+api_server.py:88:    return _ROLE_MAP.get(r, r)
+api_server.py:124:    my_role: str = Field(default="MIDDLE")
+api_server.py:133:    ally_picks_by_role: Dict[str, List[int]] = Field(default_factory=dict)
+api_server.py:134:    enemy_picks: List[int] = Field(default_factory=list)
+api_server.py:185:    my_role = normalize_role(req.my_role)
+api_server.py:187:    if my_role not in ROLES:
+api_server.py:188:        raise HTTPException(status_code=400, detail=f"invalid my_role(after normalize): {req.my_role} -> {my_role}")
+api_server.py:190:    ally: Dict[str, List[int]] = {r: [] for r in ROLES}
+api_server.py:191:    for k, v in (req.ally_picks_by_role or {}).items():
+api_server.py:192:        kk = normalize_role(k)
+api_server.py:193:        if kk in ROLES and isinstance(v, list):
+api_server.py:197:    enemy = [int(x) for x in (req.enemy_picks or []) if int(x) != 0]
+api_server.py:208:            my_role=my_role,
+api_server.py:211:            ally_picks_by_role=ally,
+api_server.py:212:            enemy_picks=enemy,
+api_server.py:227:                "my_role": my_role,
+api_server.py:236:                "enemy_role_guess": meta2.get("enemy_role_guess", {}) or {},
+api_server.py:237:                "enemy_role_guess_method": meta2.get("enemy_role_guess_method", "unknown"),
+api_server.py:238:                "enemy_role_guess_detail": meta2.get("enemy_role_guess_detail", {}) or {},
+api_server.py:239:                "used_enemy_role_column": bool(meta2.get("used_enemy_role_column", False)),
+api_server.py:240:                "counter_used_role_filtered_cnt": int(meta2.get("counter_used_role_filtered_cnt", 0) or 0),
+api_server.py:241:                "counter_used_roleless_cnt": int(meta2.get("counter_used_roleless_cnt", 0) or 0),
+app.py:37:from champ_pool_store import load_pool, save_pool, ROLES, get_pool_for_role
+app.py:43:    champ_role_distribution,
+app.py:44:    guess_enemy_roles,
+app.py:97:ROLE_KO = {"TOP": "탑", "JUNGLE": "정글", "MIDDLE": "미드", "BOTTOM": "원딜", "UTILITY": "서폿"}
+app.py:103:LCU_POS_TO_ROLE = {
+app.py:247:    if "rec_enemy" not in st.session_state:
+app.py:248:        st.session_state["rec_enemy"] = []
+app.py:249:    if "rec_ally_by_role" not in st.session_state:
+app.py:250:        st.session_state["rec_ally_by_role"] = {r: [] for r in ROLES}
+app.py:260:    """LCU/Bridge state -> (bans, ally_by_role, enemy, inferred_my_role)"""
+app.py:272:    ally_by_role = {r: [] for r in ROLES}
+app.py:278:        role = LCU_POS_TO_ROLE.get(pos)
+app.py:279:        if role in ROLES and cid not in ally_by_role[role]:
+app.py:280:            ally_by_role[role].append(cid)
+app.py:282:    enemy = []
+app.py:285:        if cid and cid not in enemy:
+app.py:286:            enemy.append(cid)
+app.py:288:    inferred_my_role = None
+app.py:294:                inferred_my_role = LCU_POS_TO_ROLE.get(pos)
+app.py:297:    return bans, ally_by_role, enemy, inferred_my_role
+app.py:300:def _make_digest(patch, tier, my_role, champ_pool, bans, ally_by_role, enemy, min_games, top_n):
+app.py:304:        "my_role": my_role,
+app.py:307:        "ally": {r: sorted([int(x) for x in ally_by_role.get(r, [])]) for r in ROLES},
+app.py:308:        "enemy": sorted([int(x) for x in enemy]),
+app.py:349:    role = st.selectbox(
+app.py:351:        ROLES,
+app.py:352:        format_func=lambda r: f"{ROLE_KO.get(r, r)} ({r})",
+app.py:353:        key="pool_role",
+app.py:358:        if cid not in pool[role]:
+app.py:359:            pool[role].append(cid)
+app.py:397:    if pool[role]:
+app.py:398:        options = pool[role][:]
+app.py:407:                pool[role] = [x for x in pool[role] if x not in set(to_del)]
+app.py:415:    st.write(f"**{ROLE_KO[role]} ({role})**: {len(pool[role])}개")
+app.py:416:    st.code(", ".join(champ_badge(cid, id_to_name) for cid in pool[role]) if pool[role] else "(비어있음)")
+app.py:419:        for r in ROLES:
+app.py:420:            st.write(f"**{ROLE_KO[r]} ({r})**: {len(pool[r])}개")
+app.py:470:    my_role = st.selectbox(
+app.py:472:        ROLES,
+app.py:473:        format_func=lambda r: f"{ROLE_KO.get(r, r)} ({r})",
+app.py:474:        key="rec_my_role",
+app.py:480:    champ_pool = [c for c in get_pool_for_role(my_role) if isinstance(c, int)]
+app.py:517:                lcu = LCUClient.from_env_or_guess(timeout=2.0)
+app.py:544:            bans, ally_by_role, enemy, inferred_role = _lcu_to_inputs(state)
+app.py:546:            st.session_state["rec_ally_by_role"] = ally_by_role
+app.py:547:            st.session_state["rec_enemy"] = enemy
+app.py:549:            if inferred_role in ROLES and st.session_state.get("rec_my_role") != inferred_role:
+app.py:550:                st.session_state["rec_my_role"] = inferred_role
+app.py:570:            for r in ROLES:
+app.py:571:                render_chips_readonly(f"{ROLE_KO[r]}({r})", st.session_state["rec_ally_by_role"].get(r, []), id_to_name)
+app.py:574:            render_chips_readonly("적군", st.session_state["rec_enemy"], id_to_name)
+app.py:585:        enemy = st.session_state["rec_enemy"]
+app.py:586:        ally_by_role = st.session_state["rec_ally_by_role"]
+app.py:618:        ally_tabs = st.tabs([f"{ROLE_KO[r]}({r})" for r in ROLES])
+app.py:619:        for idx, r in enumerate(ROLES):
+app.py:622:                    t = st.text_input(f"{ROLE_KO[r]} 챔피언 입력 후 엔터", key=f"rec_ally_text_{r}")
+app.py:628:                            if cid not in ally_by_role[r]:
+app.py:629:                                ally_by_role[r].append(cid)
+app.py:641:                        if cid not in ally_by_role[r]:
+app.py:642:                            ally_by_role[r].append(cid)
+app.py:646:                render_chips_editable(f"{ROLE_KO[r]} 아군 픽", ally_by_role[r], id_to_name, f"rec_ally_{r}")
+app.py:650:        with st.form("rec_enemy_form", clear_on_submit=True):
+app.py:651:            enemy_text = st.text_input("적 챔피언 입력 후 엔터", key="rec_enemy_text")
+app.py:654:                official, cands = resolve_name(enemy_text)
+app.py:657:                    if cid not in enemy:
+app.py:658:                        enemy.append(cid)
+app.py:661:                    st.session_state["rec_enemy_cands"] = cands
+app.py:666:        if st.session_state.get("rec_enemy_cands"):
+app.py:667:            pick = st.selectbox("적 후보 선택", st.session_state["rec_enemy_cands"], key="rec_enemy_pick")
+app.py:668:            if st.button("이 후보를 적군에 추가", key="rec_enemy_pick_btn", use_container_width=True):
+app.py:670:                if cid not in enemy:
+app.py:671:                    enemy.append(cid)
+app.py:672:                st.session_state["rec_enemy_cands"] = None
+app.py:675:        render_chips_editable("적군 픽", enemy, id_to_name, "rec_enemy")
+app.py:687:            my_role=st.session_state["rec_my_role"],
+app.py:690:            ally_by_role=st.session_state["rec_ally_by_role"],
+app.py:691:            enemy=st.session_state["rec_enemy"],
+app.py:703:                my_role=st.session_state["rec_my_role"],
+app.py:706:                ally_picks_by_role=st.session_state["rec_ally_by_role"],
+app.py:707:                enemy_picks=st.session_state["rec_enemy"],
+app.py:719:                dist = champ_role_distribution(con, patch, tier)
+app.py:720:                guessed = guess_enemy_roles(st.session_state["rec_enemy"], dist)
+app.py:721:                if st.session_state["rec_enemy"]:
+app.py:723:                        for cid in st.session_state["rec_enemy"]:
+app.py:724:                            st.write(f"- {id_to_name.get(cid,'UNKNOWN')} → {guessed.get(cid,'UNKNOWN')}")
+app_champ_pool.py:4:from champ_pool_store import load_pool, save_pool, ROLES
+app_champ_pool.py:7:ROLE_KO = {"TOP":"탑", "JUNGLE":"정글", "MIDDLE":"미드", "BOTTOM":"원딜", "UTILITY":"서폿"}
+app_champ_pool.py:36:role = st.selectbox("라인 선택", ROLES, format_func=lambda r: f"{ROLE_KO.get(r,r)} ({r})")
+app_champ_pool.py:45:    if cid in pool[role]:
+app_champ_pool.py:48:    pool[role].append(cid)
+app_champ_pool.py:50:    st.success(f"{ROLE_KO[role]}에 추가됨: {official_name} ({cid})")
+app_champ_pool.py:119:if pool[role]:
+app_champ_pool.py:120:    options = pool[role][:]
+app_champ_pool.py:126:            pool[role] = [x for x in pool[role] if x not in set(to_del)]
+app_champ_pool.py:134:st.write(f"**{ROLE_KO[role]} ({role})**: {len(pool[role])}개")
+app_champ_pool.py:135:st.code(", ".join(display_name(x) for x in pool[role]) if pool[role] else "(비어있음)")
+app_champ_pool.py:139:    for r in ROLES:
+app_champ_pool.py:140:        st.write(f"**{ROLE_KO[r]} ({r})**: {len(pool[r])}개")
+app_champ_pool.py:150:        pool[role] = []
+app_champ_pool.py:152:        st.success(f"{ROLE_KO[role]} 챔프폭을 비웠습니다.")
+app_champ_pool.py:155:        for r in ROLES:
+app_recommend.py:5:from champ_pool_store import get_pool_for_role, ROLES
+app_recommend.py:7:from recommender import recommend_champions, get_latest_patch, get_available_patches, champ_role_distribution, guess_enemy_roles
+app_recommend.py:9:ROLE_KO = {"TOP":"탑", "JUNGLE":"정글", "MIDDLE":"미드", "BOTTOM":"원딜", "UTILITY":"서폿"}
+app_recommend.py:108:my_role = st.selectbox("내 라인", ROLES, format_func=lambda r: f"{ROLE_KO.get(r,r)} ({r})")
+app_recommend.py:111:champ_pool = [c for c in get_pool_for_role(my_role) if isinstance(c, int)]
+app_recommend.py:121:if "enemy" not in st.session_state:
+app_recommend.py:122:    st.session_state["enemy"] = []
+app_recommend.py:123:if "ally_by_role" not in st.session_state:
+app_recommend.py:124:    st.session_state["ally_by_role"] = {r: [] for r in ROLES}
+app_recommend.py:127:enemy = st.session_state["enemy"]
+app_recommend.py:128:ally_by_role = st.session_state["ally_by_role"]
+app_recommend.py:161:ally_tabs = st.tabs([f"{ROLE_KO[r]}({r})" for r in ROLES])
+app_recommend.py:163:for idx, r in enumerate(ROLES):
+app_recommend.py:166:            t = st.text_input(f"{ROLE_KO[r]} 챔피언 입력 후 엔터", key=f"ally_text_{r}")
+app_recommend.py:171:                    add_champ_by_name(ally_by_role[r], official, name_to_id)
+app_recommend.py:182:                add_champ_by_name(ally_by_role[r], pick, name_to_id)
+app_recommend.py:186:        render_chips(f"{ROLE_KO[r]} 아군 픽", ally_by_role[r], id_to_name, f"ally_{r}")
+app_recommend.py:192:with st.form("enemy_form", clear_on_submit=True):
+app_recommend.py:193:    enemy_text = st.text_input("적 챔피언 입력 후 엔터", key="enemy_text")
+app_recommend.py:196:        official, cands = resolve_name(enemy_text)
+app_recommend.py:198:            add_champ_by_name(enemy, official, name_to_id)
+app_recommend.py:202:            st.session_state["enemy_cands"] = cands
+app_recommend.py:206:if st.session_state.get("enemy_cands"):
+app_recommend.py:207:    pick = st.selectbox("적 후보 선택", st.session_state["enemy_cands"], key="enemy_pick")
+app_recommend.py:209:        add_champ_by_name(enemy, pick, name_to_id)
+app_recommend.py:210:        st.session_state["enemy_cands"] = None
+app_recommend.py:213:render_chips("적군 픽", enemy, id_to_name, "enemy")
+app_recommend.py:229:    for r in ROLES:
+app_recommend.py:230:        ally_all.extend(ally_by_role[r])
+app_recommend.py:234:        dist = champ_role_distribution(con, patch, tier)
+app_recommend.py:235:        guessed = guess_enemy_roles(enemy, dist)
+app_recommend.py:236:        if enemy:
+app_recommend.py:238:            for cid in enemy:
+app_recommend.py:240:                rr = guessed.get(cid, "UNKNOWN")
+app_recommend.py:249:        my_role=my_role,
+app_recommend.py:253:        enemy_picks=enemy,
+backfill_champ_role.py:8:ROLES = ["TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY"]
+backfill_champ_role.py:35:    return f"champ_role|patch={patch.upper()}|tier={tier.upper()}"
+backfill_champ_role.py:53:    # agg_champ_role 범위 삭제
+backfill_champ_role.py:55:        con.execute("DELETE FROM agg_champ_role WHERE patch LIKE ?", (patch_pat,))
+backfill_champ_role.py:57:        con.execute("DELETE FROM agg_champ_role WHERE patch LIKE ? AND tier=?", (patch_pat, ft))
+backfill_champ_role.py:59:    print("[RESET] agg_champ_role cleared + backfill_done cleared for job_id")
+backfill_champ_role.py:99:        print("OK backfill_champ_role (nothing to do)")
+backfill_champ_role.py:124:    agg = defaultdict(lambda: [0, 0])  # (patch,tier,role,champ)->[games,wins]
+backfill_champ_role.py:135:            "SELECT role, champ_id, win FROM participants WHERE match_id=?",
+backfill_champ_role.py:139:        for role, champ_id, win in rows:
+backfill_champ_role.py:140:            role = (role or "").upper()
+backfill_champ_role.py:141:            if role not in ROLES:
+backfill_champ_role.py:145:            key = (patch, tier, role, int(champ_id))
+backfill_champ_role.py:156:                INSERT INTO agg_champ_role(patch, tier, role, champ_id, games, wins)
+backfill_champ_role.py:158:                ON CONFLICT(patch, tier, role, champ_id) DO UPDATE SET
+backfill_champ_role.py:159:                  games = agg_champ_role.games + excluded.games,
+backfill_champ_role.py:160:                  wins  = agg_champ_role.wins  + excluded.wins
+backfill_champ_role.py:179:                INSERT INTO agg_champ_role(patch, tier, role, champ_id, games, wins)
+backfill_champ_role.py:181:                ON CONFLICT(patch, tier, role, champ_id) DO UPDATE SET
+backfill_champ_role.py:182:                  games = agg_champ_role.games + excluded.games,
+backfill_champ_role.py:183:                  wins  = agg_champ_role.wins  + excluded.wins
+backfill_champ_role.py:194:    print("OK backfill_champ_role")
+backfill_matchups.py:8:ROLES = ["TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY"]
+backfill_matchups.py:53:        con.execute("DELETE FROM agg_matchup_role WHERE patch LIKE ?", (patch_pat,))
+backfill_matchups.py:55:        con.execute("DELETE FROM agg_matchup_role WHERE patch LIKE ? AND tier=?", (patch_pat, ft))
+backfill_matchups.py:57:    print("[RESET] agg_matchup_role cleared + backfill_done cleared for job_id")
+backfill_matchups.py:121:    agg = defaultdict(lambda: [0, 0])  # (patch,tier,my_role,en_role,my_champ,en_champ)->[games,wins]
+backfill_matchups.py:131:            "SELECT team_id, role, champ_id, win FROM participants WHERE match_id=?",
+backfill_matchups.py:135:        team_slots = {}  # team_id -> role -> (champ, win)
+backfill_matchups.py:136:        for team_id, role, champ_id, win in rows:
+backfill_matchups.py:137:            role = (role or "").upper()
+backfill_matchups.py:138:            if role not in ROLES:
+backfill_matchups.py:144:            if role not in team_slots[team_id]:
+backfill_matchups.py:145:                team_slots[team_id][role] = (int(champ_id), int(win or 0))
+backfill_matchups.py:158:                    for my_role in ROLES:
+backfill_matchups.py:159:                        if my_role not in my_map:
+backfill_matchups.py:161:                        my_champ, my_win = my_map[my_role]
+backfill_matchups.py:163:                        for en_role in ROLES:
+backfill_matchups.py:164:                            if en_role not in en_map:
+backfill_matchups.py:166:                            en_champ, _ = en_map[en_role]
+backfill_matchups.py:168:                            key = (patch, tier, my_role, en_role, my_champ, en_champ)
+backfill_matchups.py:179:                INSERT INTO agg_matchup_role(patch, tier, my_role, enemy_role, my_champ_id, enemy_champ_id, games, wins)
+backfill_matchups.py:181:                ON CONFLICT(patch, tier, my_role, enemy_role, my_champ_id, enemy_champ_id) DO UPDATE SET
+backfill_matchups.py:182:                  games = agg_matchup_role.games + excluded.games,
+backfill_matchups.py:183:                  wins  = agg_matchup_role.wins  + excluded.wins
+backfill_matchups.py:201:                INSERT INTO agg_matchup_role(patch, tier, my_role, enemy_role, my_champ_id, enemy_champ_id, games, wins)
+backfill_matchups.py:203:                ON CONFLICT(patch, tier, my_role, enemy_role, my_champ_id, enemy_champ_id) DO UPDATE SET
+backfill_matchups.py:204:                  games = agg_matchup_role.games + excluded.games,
+backfill_matchups.py:205:                  wins  = agg_matchup_role.wins  + excluded.wins
+build_synergy.py:8:ROLES = ["TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY"]
+build_synergy.py:36:        CREATE TABLE IF NOT EXISTS agg_synergy_role (
+build_synergy.py:39:          my_role TEXT NOT NULL,
+build_synergy.py:40:          ally_role TEXT NOT NULL,
+build_synergy.py:45:          PRIMARY KEY (patch, tier, my_role, ally_role, my_champ_id, ally_champ_id)
+build_synergy.py:71:        con.execute("DELETE FROM agg_synergy_role WHERE patch LIKE ?", (patch_pat,))
+build_synergy.py:73:        con.execute("DELETE FROM agg_synergy_role WHERE patch LIKE ? AND tier=?", (patch_pat, ft))
+build_synergy.py:75:    print("[RESET] agg_synergy_role cleared + backfill_done cleared for job_id")
+build_synergy.py:139:    agg = defaultdict(lambda: [0, 0])  # (patch,tier,my_role,ally_role,my_champ,ally_champ)->[games,wins]
+build_synergy.py:149:            "SELECT team_id, role, champ_id, win FROM participants WHERE match_id=?",
+build_synergy.py:153:        teams = {}  # team_id -> list[(role, champ, win)]
+build_synergy.py:154:        for team_id, role, champ_id, win in rows:
+build_synergy.py:155:            role = (role or "").upper()
+build_synergy.py:156:            if role not in ROLES:
+build_synergy.py:160:            teams.setdefault(int(team_id), []).append((role, int(champ_id), int(win or 0)))
+build_synergy.py:163:            for my_role, my_champ, my_win in plist:
+build_synergy.py:164:                for ally_role, ally_champ, _ in plist:
+build_synergy.py:165:                    if my_role == ally_role and my_champ == ally_champ:
+build_synergy.py:167:                    key = (patch, tier, my_role, ally_role, my_champ, ally_champ)
+build_synergy.py:178:                INSERT INTO agg_synergy_role(patch, tier, my_role, ally_role, my_champ_id, ally_champ_id, games, wins)
+build_synergy.py:180:                ON CONFLICT(patch, tier, my_role, ally_role, my_champ_id, ally_champ_id) DO UPDATE SET
+build_synergy.py:181:                  games = agg_synergy_role.games + excluded.games,
+build_synergy.py:182:                  wins  = agg_synergy_role.wins  + excluded.wins
+build_synergy.py:200:                INSERT INTO agg_synergy_role(patch, tier, my_role, ally_role, my_champ_id, ally_champ_id, games, wins)
+build_synergy.py:202:                ON CONFLICT(patch, tier, my_role, ally_role, my_champ_id, ally_champ_id) DO UPDATE SET
+build_synergy.py:203:                  games = agg_synergy_role.games + excluded.games,
+build_synergy.py:204:                  wins  = agg_synergy_role.wins  + excluded.wins
+champ_pool_store.py:5:ROLES = ["TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY"]
+champ_pool_store.py:20:        new_data = {r: [] for r in ROLES}
+champ_pool_store.py:25:        return {r: [] for r in ROLES}
+champ_pool_store.py:27:    for r in ROLES:
+champ_pool_store.py:44:        pool = {r: [] for r in ROLES}
+champ_pool_store.py:64:def get_pool_for_role(role: str):
+champ_pool_store.py:66:    return pool.get(role, [])
+champ_pool_store.py:71:    for r in ROLES:
+collector_graph.py:27:    ROLES,
+collector_graph.py:463:                        role = str(p.get("teamPosition") or "UNKNOWN")
+collector_graph.py:467:                        insert_participant(con, mid, p_puuid, champ_id, role, win, team_id)
+collector_graph_old.py:196:                        role = str(p.get("teamPosition") or "UNKNOWN")
+collector_graph_old.py:200:                        is_new = insert_participant(con, mid, p_puuid, champ_id, role, win, team_id)
+collector_graph_old.py:206:                            upsert_agg(con, patch, t, role, champ_id, win)
+db_healthcheck.py:48:        "agg_champ_role",
+db_healthcheck.py:49:        "agg_matchup_role",
+db_healthcheck.py:69:    if _table_exists(con, "agg_champ_role"):
+db_healthcheck.py:70:        print(f"- agg_champ_role: {_count(con, 'SELECT COUNT(*) FROM agg_champ_role')}")
+db_healthcheck.py:71:    if _table_exists(con, "agg_matchup_role"):
+db_healthcheck.py:72:        print(f"- agg_matchup_role: {_count(con, 'SELECT COUNT(*) FROM agg_matchup_role')}")
+db_healthcheck.py:159:    # --- top champs by sample (agg_champ_role) ---
+db_healthcheck.py:160:    print("\n[TOP CHAMPS BY GAMES] (agg_champ_role)")
+db_healthcheck.py:161:    if _table_exists(con, "agg_champ_role"):
+db_healthcheck.py:165:            SELECT patch, COALESCE(tier,'ALL') AS tier, role, champ_id, games, wins,
+db_healthcheck.py:167:            FROM agg_champ_role
+db_healthcheck.py:176:                print(f"- patch={r[0]} tier={r[1]} role={r[2]} champ={r[3]} games={r[4]} wr={r[6]}%")
+db_healthcheck.py:178:    # --- top matchups by sample (agg_matchup_role) ---
+db_healthcheck.py:179:    print("\n[TOP MATCHUPS BY GAMES] (agg_matchup_role)")
+db_healthcheck.py:180:    if _table_exists(con, "agg_matchup_role"):
+db_healthcheck.py:184:            SELECT patch, COALESCE(tier,'ALL') AS tier, my_role, enemy_role,
+db_healthcheck.py:185:                   my_champ_id, enemy_champ_id, games, wins,
+db_healthcheck.py:187:            FROM agg_matchup_role
+db_healthcheck.py:198:                    f"my={r[4]} enemy={r[5]} games={r[6]} wr={r[8]}%"
+lcu_client.py:154:    def guess_lockfile_paths() -> List[str]:
+lcu_client.py:176:    def from_env_or_guess(cls, timeout: float = 2.0) -> "LCUClient":
+lcu_client.py:178:        for p in cls.guess_lockfile_paths():
+lcu_probe.py:6:    lcu = LCUClient.from_env_or_guess()
+lopa_bridge.py:51:def _guess_lockfile_paths() -> list[str]:
+lopa_bridge.py:268:        for cand in _guess_lockfile_paths():
+make_public_db.py:5:# - 단, "추천 필수 집계 테이블(agg_champ_role)"이 없으면
+make_public_db.py:18:    "agg_champ_role",
+make_public_db.py:19:    "agg_matchup_role",
+make_public_db.py:20:    "agg_synergy_role",
+make_public_db.py:21:    "agg_champ_role_total",
+make_public_db.py:26:    "agg_champ_role",  # recommend 필수
+make_public_db.py:102:            print("[ERR] 해결: agg_champ_role 등이 들어있는 DB를 src로 지정하거나, 집계(backfill/build)를 먼저 수행해야 함.")
+recommender.py:9:ROLES = ["TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY"]
+recommender.py:41:def _normalize_role_with_db(con: sqlite3.Connection, role: str) -> str:
+recommender.py:42:    r = (role or "").upper().strip()
+recommender.py:46:    db_roles = set()
+recommender.py:47:    if _table_exists(con, "agg_champ_role"):
+recommender.py:48:        for row in con.execute("SELECT DISTINCT role FROM agg_champ_role WHERE role IS NOT NULL"):
+recommender.py:51:                db_roles.add(str(x).upper())
+recommender.py:52:    if not db_roles and _table_exists(con, "participants"):
+recommender.py:53:        for row in con.execute("SELECT DISTINCT role FROM participants WHERE role IS NOT NULL"):
+recommender.py:56:                db_roles.add(str(x).upper())
+recommender.py:72:    if not db_roles or r in db_roles:
+recommender.py:76:        if cand in db_roles:
+recommender.py:81:            if cand in ROLES:
+recommender.py:121:# enemy role guess
+recommender.py:123:def champ_role_distribution(con: sqlite3.Connection, patch: str, tier: str) -> Dict[int, Dict[str, int]]:
+recommender.py:125:    if not _table_exists(con, "agg_champ_role"):
+recommender.py:132:      SELECT champ_id, role, SUM(games)
+recommender.py:133:      FROM agg_champ_role
+recommender.py:135:      GROUP BY champ_id, role
+recommender.py:139:        role = row[1]
+recommender.py:141:        if cid is None or role is None:
+recommender.py:143:        dist[int(cid)][str(role).upper()] += int(g or 0)
+recommender.py:147:def _role_ratio(dist_for_champ: Dict[str, int], role: str) -> float:
+recommender.py:158:    return float(int(dist_for_champ.get(role, 0) or 0)) / float(total)
+recommender.py:173:def _best_role_for_champ(cid: int, dist: Dict[int, Dict[str, int]], roles: List[str]) -> str:
+recommender.py:178:    best_role = "UNKNOWN"
+recommender.py:181:    for r in roles:
+recommender.py:182:        rr = _role_ratio(m, r)
+recommender.py:185:        key = (rr, g_r, total, -roles.index(r), -int(cid))
+recommender.py:188:            best_role = r
+recommender.py:190:    return best_role
+recommender.py:193:def build_enemy_role_guess_detail(enemy_ids: List[int], dist: Dict[int, Dict[str, int]]) -> Dict[int, Dict[str, Any]]:
+recommender.py:194:    ids = [int(x) for x in (enemy_ids or []) if int(x) != 0]
+recommender.py:204:                "top_role": "UNKNOWN",
+recommender.py:207:                "role_games": {r: 0 for r in ROLES},
+recommender.py:211:        top_role = _best_role_for_champ(cid, dist, ROLES)
+recommender.py:212:        top_games = int(m.get(top_role, 0) or 0) if top_role in ROLES else 0
+recommender.py:217:            "top_role": top_role,
+recommender.py:220:            "role_games": {r: int(m.get(r, 0) or 0) for r in ROLES},
+recommender.py:226:def guess_enemy_roles_iterative(enemy_ids: List[int], dist: Dict[int, Dict[str, int]]) -> Dict[int, str]:
+recommender.py:230:    ids = [int(x) for x in (enemy_ids or []) if int(x) != 0]
+recommender.py:237:    remaining_roles = ROLES[:]
+recommender.py:241:    while remaining_champs and remaining_roles and guard < 50:
+recommender.py:244:        # 1) role별 winner champ 찾기
+recommender.py:245:        role_winner: Dict[str, int] = {}
+recommender.py:246:        for role in remaining_roles:
+recommender.py:253:                rr = _role_ratio(m, role) if total > 0 else 0.0
+recommender.py:254:                g_r = int(m.get(role, 0) or 0)
+recommender.py:261:                role_winner[role] = int(best_cid)
+recommender.py:263:        # 2) champ별로 자기가 winner인 role들 모으기
+recommender.py:265:        for role, cid in role_winner.items():
+recommender.py:266:            champ_wins[int(cid)].append(role)
+recommender.py:270:        for cid, roles_won in champ_wins.items():
+recommender.py:280:                chosen_role = "UNKNOWN"
+recommender.py:282:                chosen_role = None
+recommender.py:284:                for r in roles_won:
+recommender.py:285:                    rr = _role_ratio(m, r)
+recommender.py:287:                    key = (rr, g_r, total, -remaining_roles.index(r), -cid)
+recommender.py:290:                        chosen_role = r
+recommender.py:291:                chosen_role = chosen_role or "UNKNOWN"
+recommender.py:293:            newly_assigned.append((cid, chosen_role))
+recommender.py:297:            role = _best_role_for_champ(cid, dist, remaining_roles)
+recommender.py:298:            assigned[cid] = role
+recommender.py:300:            if role in remaining_roles:
+recommender.py:301:                remaining_roles.remove(role)
+recommender.py:305:        for cid, role in newly_assigned:
+recommender.py:306:            assigned[int(cid)] = role
+recommender.py:311:        assigned_roles_set = set(r for _, r in newly_assigned if r in remaining_roles)
+recommender.py:312:        remaining_roles = [r for r in remaining_roles if r not in assigned_roles_set]
+recommender.py:316:        out2[cid] = assigned.get(cid, _best_role_for_champ(cid, dist, ROLES))
+recommender.py:327:    my_role: str,
+recommender.py:330:    ally_picks_by_role: Dict[str, List[int]],
+recommender.py:331:    enemy_picks: List[int],
+recommender.py:340:        if not _table_exists(con, "agg_champ_role"):
+recommender.py:341:            return [], {"reason": "missing table agg_champ_role"}
+recommender.py:343:        my_role_db = _normalize_role_with_db(con, my_role)
+recommender.py:351:          FROM agg_champ_role
+recommender.py:352:          WHERE role=?
+recommender.py:356:        total_row = con.execute(q_total, (my_role_db, *patch_args, *tier_args)).fetchone()
+recommender.py:357:        total_games_for_role = int((total_row[0] if total_row else 0) or 0)
+recommender.py:363:        enemy_role_guess: Dict[int, str] = {}
+recommender.py:364:        enemy_role_guess_detail: Dict[int, Dict[str, Any]] = {}
+recommender.py:365:        if enemy_picks:
+recommender.py:366:            dist_for_guess = champ_role_distribution(con, patch, tier)
+recommender.py:367:            enemy_role_guess = guess_enemy_roles_iterative([int(x) for x in (enemy_picks or [])], dist_for_guess)
+recommender.py:368:            enemy_role_guess_detail = build_enemy_role_guess_detail(enemy_picks, dist_for_guess)
+recommender.py:378:                    "enemy_role_guess": enemy_role_guess,
+recommender.py:379:                    "enemy_role_guess_method": "iterative_v1",
+recommender.py:380:                    "enemy_role_guess_detail": enemy_role_guess_detail,
+recommender.py:384:            if total_games_for_role <= 0:
+recommender.py:386:                    "reason": "total_games_for_role is 0 (no data for role/patch/tier)",
+recommender.py:387:                    "enemy_role_guess": enemy_role_guess,
+recommender.py:388:                    "enemy_role_guess_method": "iterative_v1",
+recommender.py:389:                    "enemy_role_guess_detail": enemy_role_guess_detail,
+recommender.py:394:              FROM agg_champ_role
+recommender.py:395:              WHERE role=?
+recommender.py:402:            rows = con.execute(q_cand, (my_role_db, *patch_args, *tier_args, int(max_candidates))).fetchall()
+recommender.py:412:                pr = (g / total_games_for_role) if total_games_for_role > 0 else 0.0
+recommender.py:419:                    "enemy_role_guess": enemy_role_guess,
+recommender.py:420:                    "enemy_role_guess_method": "iterative_v1",
+recommender.py:421:                    "enemy_role_guess_detail": enemy_role_guess_detail,
+recommender.py:426:          FROM agg_champ_role
+recommender.py:427:          WHERE role=?
+recommender.py:433:        rows = con.execute(q_base, (my_role_db, *patch_args, *tier_args, *candidates)).fetchall()
+recommender.py:435:        used_fallback_roleless = False
+recommender.py:437:            used_fallback_roleless = True
+recommender.py:440:              FROM agg_champ_role
+recommender.py:451:                "enemy_role_guess": enemy_role_guess,
+recommender.py:452:                "enemy_role_guess_method": "iterative_v1",
+recommender.py:453:                "enemy_role_guess_detail": enemy_role_guess_detail,
+recommender.py:470:            if total_games_for_role > 0:
+recommender.py:471:                pr = g / total_games_for_role
+recommender.py:478:                "enemy_role_guess": enemy_role_guess,
+recommender.py:479:                "enemy_role_guess_method": "iterative_v1",
+recommender.py:480:                "enemy_role_guess_detail": enemy_role_guess_detail,
+recommender.py:486:        if _table_exists(con, "agg_synergy_role"):
+recommender.py:487:            sc = _cols(con, "agg_synergy_role")
+recommender.py:488:            my_role_col = "my_role" if "my_role" in sc else ("role" if "role" in sc else None)
+recommender.py:489:            ally_role_col = "ally_role" if "ally_role" in sc else ("other_role" if "other_role" in sc else None)
+recommender.py:493:            if my_role_col and my_c_col and ally_c_col:
+recommender.py:494:                for ally_role, ally_list in (ally_picks_by_role or {}).items():
+recommender.py:495:                    ally_role_u = _normalize_role_with_db(con, ally_role)
+recommender.py:501:                          FROM agg_synergy_role
+recommender.py:502:                          WHERE {my_role_col}=? AND {ally_c_col}=?
+recommender.py:506:                        syn_args: List[Any] = [my_role_db, ally_cid, *patch_args, *tier_args]
+recommender.py:507:                        if ally_role_col:
+recommender.py:508:                            q_syn = q_syn.replace("WHERE", "WHERE " + ally_role_col + "=? AND ", 1)
+recommender.py:509:                            syn_args = [ally_role_u] + syn_args
+recommender.py:527:        used_enemy_role_column = False
+recommender.py:528:        used_role_filtered_cnt = 0
+recommender.py:529:        used_roleless_cnt = 0
+recommender.py:531:        if _table_exists(con, "agg_matchup_role"):
+recommender.py:532:            mc = _cols(con, "agg_matchup_role")
+recommender.py:533:            my_role_col = "my_role" if "my_role" in mc else ("role" if "role" in mc else None)
+recommender.py:534:            enemy_role_col = "enemy_role" if "enemy_role" in mc else None
+recommender.py:536:            e_c_col = "enemy_champ_id" if "enemy_champ_id" in mc else ("other_champ_id" if "other_champ_id" in mc else None)
+recommender.py:538:            used_enemy_role_column = bool(enemy_role_col)
+recommender.py:540:            if my_role_col and my_c_col and e_c_col:
+recommender.py:541:                for e_cid in (enemy_picks or []):
+recommender.py:543:                    e_role = enemy_role_guess.get(e_cid, "UNKNOWN")
+recommender.py:545:                    if enemy_role_col and e_role != "UNKNOWN":
+recommender.py:546:                        used_role_filtered_cnt += 1
+recommender.py:549:                          FROM agg_matchup_role
+recommender.py:550:                          WHERE {my_role_col}=? AND {enemy_role_col}=? AND {e_c_col}=?
+recommender.py:554:                        args_ct: Tuple[Any, ...] = (my_role_db, e_role, e_cid, *patch_args, *tier_args)
+recommender.py:556:                        used_roleless_cnt += 1
+recommender.py:559:                          FROM agg_matchup_role
+recommender.py:560:                          WHERE {my_role_col}=? AND {e_c_col}=?
+recommender.py:564:                        args_ct = (my_role_db, e_cid, *patch_args, *tier_args)
+recommender.py:617:            "role_used": my_role_db,
+recommender.py:623:            "total_games_for_role": int(total_games_for_role),
+recommender.py:626:            "used_fallback_roleless": bool(used_fallback_roleless),
+recommender.py:627:            "enemy_role_guess": enemy_role_guess,
+recommender.py:628:            "enemy_role_guess_method": "iterative_v1",
+recommender.py:629:            "enemy_role_guess_detail": enemy_role_guess_detail,
+recommender.py:630:            "used_enemy_role_column": bool(used_enemy_role_column),
+recommender.py:631:            "counter_used_role_filtered_cnt": int(used_role_filtered_cnt),
+recommender.py:632:            "counter_used_roleless_cnt": int(used_roleless_cnt),
+storage.py:8:ROLES = ["TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY"]
+storage.py:58:          role TEXT,
+storage.py:66:    con.execute("CREATE INDEX IF NOT EXISTS idx_participants_role ON participants(role);")
+storage.py:69:    # agg_champ_role
+storage.py:72:        CREATE TABLE IF NOT EXISTS agg_champ_role (
+storage.py:75:          role TEXT NOT NULL,
+storage.py:79:          PRIMARY KEY (patch, tier, role, champ_id)
+storage.py:146:    # ✅ agg_matchup_role
+storage.py:149:        CREATE TABLE IF NOT EXISTS agg_matchup_role (
+storage.py:152:          my_role TEXT NOT NULL,
+storage.py:153:          enemy_role TEXT NOT NULL,
+storage.py:155:          enemy_champ_id INTEGER NOT NULL,
+storage.py:158:          PRIMARY KEY (patch, tier, my_role, enemy_role, my_champ_id, enemy_champ_id)
+storage.py:229:def insert_participant(con: sqlite3.Connection, match_id: str, puuid: str, champ_id: int, role: str, win: int, team_id: int) -> bool:
+storage.py:232:        INSERT OR IGNORE INTO participants(match_id, puuid, champ_id, role, win, team_id)
+storage.py:235:        (match_id, puuid, champ_id, role, win, team_id),
+storage.py:240:def upsert_agg(con: sqlite3.Connection, patch: str, tier: Optional[str], role: str, champ_id: int, win: int):
+storage.py:243:        INSERT INTO agg_champ_role(patch, tier, role, champ_id, games, wins)
+storage.py:245:        ON CONFLICT(patch, tier, role, champ_id) DO UPDATE SET
+storage.py:249:        (patch, tier, role, champ_id, 1 if win else 0),
+storage.py:313:def upsert_matchup_role(con: sqlite3.Connection, patch: str, tier: Optional[str],
+storage.py:314:                        my_role: str, enemy_role: str,
+storage.py:315:                        my_champ_id: int, enemy_champ_id: int, win: int):
+storage.py:318:        INSERT INTO agg_matchup_role(patch, tier, my_role, enemy_role, my_champ_id, enemy_champ_id, games, wins)
+storage.py:320:        ON CONFLICT(patch, tier, my_role, enemy_role, my_champ_id, enemy_champ_id) DO UPDATE SET
+storage.py:324:        (patch, tier, my_role, enemy_role, my_champ_id, enemy_champ_id, 1 if win else 0),
+storage.py:330:                   my_role: str, enemy_role: str,
+storage.py:331:                   my_champ_id: int, enemy_champ_id: int, win: int):
+storage.py:332:    return upsert_matchup_role(
+storage.py:336:        my_role=my_role,
+storage.py:337:        enemy_role=enemy_role,
+storage.py:339:        enemy_champ_id=enemy_champ_id,
+storage_old.py:26:  role TEXT,
+storage_old.py:33:-- (patch, tier, role, champ) 단위 games/wins
+storage_old.py:34:CREATE TABLE IF NOT EXISTS agg_champ_role (
+storage_old.py:37:  role TEXT,
+storage_old.py:41:  PRIMARY KEY (patch, tier, role, champ_id)
+storage_old.py:44:-- (patch, tier, champ) 단위 role별 games 합 (P(role|champ) 계산용)
+storage_old.py:45:CREATE TABLE IF NOT EXISTS agg_champ_role_total (
+storage_old.py:55:CREATE INDEX IF NOT EXISTS idx_part_role ON participants(role);
+storage_old.py:58:CREATE INDEX IF NOT EXISTS idx_agg_cr ON agg_champ_role(patch, tier, role, champ_id);
+storage_old.py:59:CREATE INDEX IF NOT EXISTS idx_agg_tot ON agg_champ_role_total(patch, tier, champ_id);
+storage_old.py:90:                       role: str, win: int, team_id: int) -> bool:
+storage_old.py:92:        "INSERT OR IGNORE INTO participants(match_id,puuid,champ_id,role,win,team_id) VALUES(?,?,?,?,?,?)",
+storage_old.py:93:        (match_id, puuid, champ_id, role, win, team_id),
+storage_old.py:98:               role: str, champ_id: int, win: int):
+storage_old.py:102:    # agg_champ_role
+storage_old.py:104:        "INSERT INTO agg_champ_role(patch,tier,role,champ_id,games,wins) VALUES(?,?,?,?,1,?) "
+storage_old.py:105:        "ON CONFLICT(patch,tier,role,champ_id) DO UPDATE SET "
+storage_old.py:107:        (patch, tier, role, champ_id, int(win)),
+storage_old.py:109:    # agg_champ_role_total
+storage_old.py:111:        "INSERT INTO agg_champ_role_total(patch,tier,champ_id,total_games) VALUES(?,?,?,1) "
