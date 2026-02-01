@@ -1,0 +1,58 @@
+# =========================
+# LOPA - safety gitignore
+# =========================
+
+# --- Secrets / Env ---
+.env
+.env.*
+!.env.example
+.lopa_bridge_token.txt
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.venv/
+venv/
+ENV/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.log
+
+# --- OS / Editor ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# --- Node / Next.js (web/) ---
+node_modules/
+.next/
+out/
+dist/
+build/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# --- DB / Data artifacts ---
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.db-wal
+*.db-shm
+
+# If you keep sample DBs intentionally, whitelist them like:
+# !sample_data/*.db
+
+# --- Misc ---
+*.tmp
+*.temp
+*.bak
+*.swp
