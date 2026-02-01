@@ -70,6 +70,9 @@ export function loadRecommendPrefs() {
     // ✅ NEW: 입력 모드 (기본 자동)
     manualInput: asBool(j.manualInput, false),
 
+    // ✅ NEW: 자동 추천(확정 이벤트 기반) (기본 ON)
+    autoRecommend: asBool(j.autoRecommend, true),
+
     showAdvanced: asBool(j.showAdvanced, false),
     showRawResults: asBool(j.showRawResults, false),
     showRawState: asBool(j.showRawState, false),
