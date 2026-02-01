@@ -13,16 +13,6 @@ function safeParse(raw) {
   }
 }
 
-function isLocalHost() {
-  if (typeof window === "undefined") return false;
-  const h = String(window.location?.hostname || "");
-  return h === "localhost" || h === "127.0.0.1";
-}
-
-function defaultDbPath() {
-  return isLocalHost() ? "lol_graph_personal.db" : "lol_graph_public.db";
-}
-
 function asInt(x, def) {
   const n = parseInt(String(x ?? ""), 10);
   return Number.isFinite(n) ? n : def;
@@ -56,32 +46,30 @@ export function loadRecommendPrefs() {
   const j = safeParse(raw);
   if (!j) return null;
 
-  // minGames: backend 검증(min>=1) 때문에 로드시에도 clamp
-  const mg = Math.max(1, asInt(j.minGames, 1));
-  const tn = Math.max(1, asInt(j.topN, 10));
-
-  // minPickRatePct: 0도 유효해야 하므로 || 로 처리하지 않음
-  const mpr = asNum(j.minPickRatePct, 0.5);
-
   return {
-    dbPath: asStr(j.dbPath, defaultDbPath()),
+    dbPath: asStr(j.dbPath, "lol_graph_personal.db"),
     patch: asStr(j.patch, "ALL"),
     tier: asStr(j.tier, "ALL"),
     myRole: asStr(j.myRole, "MIDDLE"),
 
     candidateMode: asStr(j.candidateMode, "ALL"),
-    minPickRatePct: mpr,
+    minPickRatePct: asNum(j.minPickRatePct, 0.5),
 
-    // 기본은 비우는 방향(전체 후보 모드에서 의미 없음)
-    champPoolText: asStr(j.champPoolText, ""),
+    champPoolText: asStr(j.champPoolText, "103,7,61"),
     bansText: asStr(j.bansText, ""),
     enemyText: asStr(j.enemyText, ""),
 
     allyByRole: asObj(j.allyByRole, {}),
-    minGames: mg,
-    topN: tn,
+
+    // ✅ minGames는 1이 최소 (기본 1)
+    minGames: asInt(j.minGames, 1),
+    topN: asInt(j.topN, 10),
 
     autoPull: asBool(j.autoPull, true),
+
+    // ✅ NEW: 입력 모드 (기본 자동)
+    manualInput: asBool(j.manualInput, false),
+
     showAdvanced: asBool(j.showAdvanced, false),
     showRawResults: asBool(j.showRawResults, false),
     showRawState: asBool(j.showRawState, false),
@@ -93,9 +81,6 @@ export function saveRecommendPrefs(prefs) {
 
   const payload = {
     ...prefs,
-    // 안전장치: 저장 시에도 clamp (문자열로 들어와도 OK)
-    minGames: Math.max(1, parseInt(String(prefs?.minGames ?? 1), 10) || 1),
-    topN: Math.max(1, parseInt(String(prefs?.topN ?? 10), 10) || 10),
     savedAt: Date.now(),
   };
 

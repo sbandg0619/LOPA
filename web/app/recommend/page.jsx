@@ -100,7 +100,10 @@ function sanitizeAlly(obj) {
 }
 
 /**
- * pick_rate 표시 유틸
+ * ✅ pick_rate 표시 유틸
+ * - API가 pick_rate(0~1) / pick_rate_pct(0~100) / pickRate / pickRatePct 등으로 줄 수 있어서 모두 처리
+ * - 0~1이면 %로 변환
+ * - 그래도 없으면 (n/a)
  */
 function formatPickRate(rec) {
   if (!rec || typeof rec !== "object") return "(n/a)";
@@ -177,7 +180,11 @@ function renderIdChips({ ids, idToName, onRemove }) {
   return (
     <div style={{ marginTop: 6 }}>
       {ids.map((cid) => (
-        <Chip key={cid} label={`${idToName?.[cid] || "UNKNOWN"} (${cid})`} onRemove={onRemove ? () => onRemove(cid) : null} />
+        <Chip
+          key={cid}
+          label={`${idToName?.[cid] || "UNKNOWN"} (${cid})`}
+          onRemove={onRemove ? () => onRemove(cid) : null}
+        />
       ))}
     </div>
   );
@@ -187,8 +194,14 @@ function resolveChampionIdByName(input, { nameToId, normToId }) {
   const q = String(input || "").trim();
   if (!q) return { id: null, candidates: [] };
 
+  // 1) 숫자 입력이면 id로 처리
+  const asNum = parseInt(q, 10);
+  if (Number.isFinite(asNum) && asNum !== 0) return { id: asNum, candidates: [] };
+
+  // 2) exact name
   if (nameToId && nameToId[q]) return { id: parseInt(nameToId[q], 10), candidates: [] };
 
+  // 3) normalized exact
   const nq = norm(q);
   if (normToId && normToId[nq]) return { id: normToId[nq], candidates: [] };
 
@@ -238,12 +251,6 @@ function ScoreBar({ value }) {
   );
 }
 
-function isLocalHost() {
-  if (typeof window === "undefined") return false;
-  const h = String(window.location?.hostname || "");
-  return h === "localhost" || h === "127.0.0.1";
-}
-
 export default function RecommendPage() {
   const [bridgeBase, setBridgeBase] = useState("");
   const [bridgeToken, setBridgeToken] = useState("");
@@ -255,9 +262,15 @@ export default function RecommendPage() {
 
   const [autoPull, setAutoPull] = useState(true);
 
-  const LOCAL = typeof window !== "undefined" ? isLocalHost() : false;
+  // ✅ NEW: 입력 모드 (기본=자동/브릿지)
+  // - manualInput=false: 브릿지 Pull 결과로 bans/enemy/ally 자동 반영
+  // - manualInput=true : 브릿지는 상태만 보고(phase/lastState) 입력값은 덮어쓰지 않음
+  const [manualInput, setManualInput] = useState(false);
 
-  const DEFAULT_DB_PATH = LOCAL ? "lol_graph_personal.db" : "lol_graph_public.db";
+  const DEFAULT_DB_PATH =
+    typeof window !== "undefined" && (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1")
+      ? "lol_graph_personal.db"
+      : "lol_graph_public.db";
 
   const [dbPath, setDbPath] = useState(DEFAULT_DB_PATH);
   const [patch, setPatch] = useState("ALL");
@@ -272,7 +285,7 @@ export default function RecommendPage() {
   const [availablePatches, setAvailablePatches] = useState([]);
   const [latestPatch, setLatestPatch] = useState("");
 
-  const [champPoolText, setChampPoolText] = useState("");
+  const [champPoolText, setChampPoolText] = useState("103,7,61");
   const [bansText, setBansText] = useState("");
   const [enemyText, setEnemyText] = useState("");
 
@@ -317,13 +330,7 @@ export default function RecommendPage() {
     const p = loadRecommendPrefs();
     if (!p) return;
 
-    // 배포 환경에서는 public로 강제(개인 db_path가 섞여 meta/recommend 깨지는 것 방지)
-    if (LOCAL) {
-      if (p.dbPath) setDbPath(p.dbPath);
-    } else {
-      setDbPath("lol_graph_public.db");
-    }
-
+    if (p.dbPath) setDbPath(p.dbPath);
     if (p.patch) setPatch(p.patch);
     if (p.tier) setTier(p.tier);
     if (p.myRole) setMyRole(p.myRole);
@@ -336,11 +343,10 @@ export default function RecommendPage() {
     setAllyByRole(ally2);
     setAllyJsonText(JSON.stringify(ally2));
 
-    // min_games는 항상 1 이상
     const mg = Math.max(1, Number(p.minGames) || 1);
     setMinGames(mg);
 
-    setTopN(Math.max(1, Number(p.topN) || 10));
+    setTopN(Number(p.topN) || 10);
 
     setAutoPull(Boolean(p.autoPull));
     setShowAdvanced(Boolean(p.showAdvanced));
@@ -348,13 +354,11 @@ export default function RecommendPage() {
     setShowRawState(Boolean(p.showRawState));
 
     if (p.candidateMode) setCandidateMode(String(p.candidateMode));
+    if (typeof p.minPickRatePct !== "undefined") setMinPickRatePct(Number(p.minPickRatePct) || 0.5);
 
-    // 0도 유효한 값이므로 || 로 처리하지 않음
-    if (typeof p.minPickRatePct !== "undefined") {
-      const n = Number(p.minPickRatePct);
-      setMinPickRatePct(Number.isFinite(n) ? n : 0.5);
-    }
-  }, [LOCAL]);
+    // ✅ NEW
+    setManualInput(Boolean(p.manualInput));
+  }, []);
 
   const saveTimerRef = useRef(null);
   useEffect(() => {
@@ -363,7 +367,7 @@ export default function RecommendPage() {
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     saveTimerRef.current = setTimeout(() => {
       saveRecommendPrefs({
-        dbPath: LOCAL ? dbPath : "lol_graph_public.db",
+        dbPath,
         patch,
         tier,
         myRole,
@@ -376,6 +380,7 @@ export default function RecommendPage() {
         minGames: Math.max(1, Number(minGames) || 1),
         topN: Math.max(1, Number(topN) || 10),
         autoPull,
+        manualInput, // ✅ NEW
         showAdvanced,
         showRawResults,
         showRawState,
@@ -386,7 +391,6 @@ export default function RecommendPage() {
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     };
   }, [
-    LOCAL,
     dbPath,
     patch,
     tier,
@@ -400,6 +404,7 @@ export default function RecommendPage() {
     minGames,
     topN,
     autoPull,
+    manualInput,
     showAdvanced,
     showRawResults,
     showRawState,
@@ -521,16 +526,19 @@ export default function RecommendPage() {
         setLastState(j.state);
         setPhase(j.state.phase || "Unknown");
 
-        const bans = extractBans(j.state);
-        const enemy = extractEnemy(j.state);
-        const ally = extractAllyByRole(j.state);
+        // ✅ 자동 입력 모드에서만 bans/enemy/ally 덮어쓰기
+        if (!manualInput) {
+          const bans = extractBans(j.state);
+          const enemy = extractEnemy(j.state);
+          const ally = extractAllyByRole(j.state);
 
-        setBansText(idsToText(bans));
-        setEnemyText(idsToText(enemy));
+          setBansText(idsToText(bans));
+          setEnemyText(idsToText(enemy));
 
-        const ally2 = sanitizeAlly(ally);
-        setAllyByRole(ally2);
-        setAllyJsonText(JSON.stringify(ally2));
+          const ally2 = sanitizeAlly(ally);
+          setAllyByRole(ally2);
+          setAllyJsonText(JSON.stringify(ally2));
+        }
 
         setBridgeOk(true);
       }
@@ -575,7 +583,7 @@ export default function RecommendPage() {
       clearInterval(healthTimer);
       clearInterval(stateTimer);
     };
-  }, [effectiveBase, effectiveToken, autoPull]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [effectiveBase, effectiveToken, autoPull, manualInput]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const obj = safeJsonParse(allyJsonText);
@@ -591,7 +599,7 @@ export default function RecommendPage() {
     setMetaErr("");
     setMetaLoading(true);
     try {
-      const j = await apiMeta(LOCAL ? dbPath : "lol_graph_public.db");
+      const j = await apiMeta(dbPath);
       const patches = Array.isArray(j?.patches) ? j.patches : [];
       const latest = String(j?.latest_patch || "");
       setAvailablePatches(patches);
@@ -612,7 +620,7 @@ export default function RecommendPage() {
   useEffect(() => {
     loadMeta({ silent: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dbPath, LOCAL]);
+  }, [dbPath]);
 
   const champPoolIds = useMemo(() => parseIds(champPoolText), [champPoolText]);
   const bansIds = useMemo(() => parseIds(bansText), [bansText]);
@@ -629,32 +637,80 @@ export default function RecommendPage() {
     setter(idsToText(ids));
   }
 
+  // ===== 수동 입력 UI(이름으로 추가) =====
   const [poolName, setPoolName] = useState("");
-  const [nameHints, setNameHints] = useState({ kind: "", cands: [] });
+  const [banName, setBanName] = useState("");
+  const [enemyName, setEnemyName] = useState("");
+  const [allyNameByRole, setAllyNameByRole] = useState(() => ({ TOP: "", JUNGLE: "", MIDDLE: "", BOTTOM: "", UTILITY: "" }));
 
-  function applyHintPick(kind, cid) {
-    setNameHints({ kind: "", cands: [] });
+  // nameHints: { kind: "pool"|"bans"|"enemy"|"ally", role?: "TOP"... , cands: [id...] }
+  const [nameHints, setNameHints] = useState({ kind: "", role: "", cands: [] });
+
+  function applyHintPick(kind, cid, role = "") {
+    setNameHints({ kind: "", role: "", cands: [] });
+
     if (kind === "pool") addIdToText(setChampPoolText, champPoolText, cid);
+    if (kind === "bans") addIdToText(setBansText, bansText, cid);
+    if (kind === "enemy") addIdToText(setEnemyText, enemyText, cid);
+
+    if (kind === "ally" && role && ROLES.includes(role)) {
+      setAllyByRole((prev) => {
+        const next = { ...prev };
+        const arr = Array.isArray(next[role]) ? [...next[role]] : [];
+        if (!arr.includes(cid)) arr.push(cid);
+        next[role] = arr;
+        return next;
+      });
+    }
   }
 
   function renderHints() {
     if (!nameHints?.cands?.length) return null;
+
+    const title =
+      nameHints.kind === "pool"
+        ? "Champ Pool 후보"
+        : nameHints.kind === "bans"
+        ? "Bans 후보"
+        : nameHints.kind === "enemy"
+        ? "Enemy 후보"
+        : nameHints.kind === "ally"
+        ? `Ally 후보 (${nameHints.role})`
+        : "이름 후보";
+
     return (
       <div className="card" style={{ marginTop: 10 }}>
-        <div className="h2">이름 후보</div>
+        <div className="h2">{title}</div>
         <div className="p">정확히 매칭이 안돼서 후보를 띄웠음. 하나 클릭하면 추가됨.</div>
         <div style={{ marginTop: 8 }} className="row">
           {nameHints.cands.map((cid) => (
-            <button key={`hint_btn_${cid}`} className="btn" onClick={() => applyHintPick(nameHints.kind, cid)}>
+            <button key={`hint_btn_${cid}`} className="btn" onClick={() => applyHintPick(nameHints.kind, cid, nameHints.role)}>
               {idToName?.[cid] || `UNKNOWN (${cid})`}
             </button>
           ))}
-          <button className="btn" onClick={() => setNameHints({ kind: "", cands: [] })}>
+          <button className="btn" onClick={() => setNameHints({ kind: "", role: "", cands: [] })}>
             닫기
           </button>
         </div>
       </div>
     );
+  }
+
+  function addByNameOrHint({ kind, role, input, clearInput, addByIdFallback }) {
+    const txt = String(input || "").trim();
+    if (!txt) return;
+
+    const { id, candidates } = resolveChampionIdByName(txt, { nameToId, normToId });
+    if (id) {
+      // 숫자 입력도 여기로 들어옴
+      addByIdFallback(id);
+      clearInput("");
+      return;
+    }
+    if (candidates?.length) {
+      setNameHints({ kind, role: role || "", cands: candidates });
+      return;
+    }
   }
 
   async function runRecommend() {
@@ -672,21 +728,16 @@ export default function RecommendPage() {
 
     const minPickRate = Math.max(0, Number(minPickRatePct) || 0) / 100.0;
 
-    // ✅ 핵심: ALL 모드면 champ_pool 키 자체를 보내지 않음(omit)
     const body = {
-      db_path: LOCAL ? dbPath : "lol_graph_public.db",
+      db_path: dbPath,
       patch,
       tier,
       my_role: myRole,
-
       use_champ_pool: candidateMode === "POOL",
-
-      ...(candidateMode === "POOL" ? { champ_pool: champPoolIds } : {}),
-
+      champ_pool: candidateMode === "POOL" ? champPoolIds : [],
       bans: bansIds,
       enemy_picks: enemyIds,
       ally_picks_by_role: allyByRole,
-
       min_games: Math.max(1, Number(minGames) || 1),
       min_pick_rate: minPickRate,
       top_n: Math.max(1, Number(topN) || 10),
@@ -742,7 +793,7 @@ export default function RecommendPage() {
 
           <div className="kv">
             <div className="k">db_path</div>
-            <div className="v">{LOCAL ? dbPath : "lol_graph_public.db"}</div>
+            <div className="v">{dbPath}</div>
 
             <div className="k">latest_patch</div>
             <div className="v">{latestPatch || "(unknown)"}</div>
@@ -856,7 +907,7 @@ export default function RecommendPage() {
               setCandidateMode("ALL");
               setMinPickRatePct(0.5);
 
-              setChampPoolText("");
+              setChampPoolText("103,7,61");
               setBansText("");
               setEnemyText("");
 
@@ -868,6 +919,7 @@ export default function RecommendPage() {
               setTopN(10);
 
               setAutoPull(true);
+              setManualInput(false); // ✅ NEW: 기본 자동
               setShowAdvanced(false);
               setShowRawResults(false);
               setShowRawState(false);
@@ -892,17 +944,7 @@ export default function RecommendPage() {
         <div className="row">
           <div style={{ flex: 1, minWidth: 260 }}>
             <div className="p" style={{ fontWeight: 800 }}>db_path</div>
-            <input
-              className="input"
-              value={LOCAL ? dbPath : "lol_graph_public.db"}
-              disabled={!LOCAL}
-              onChange={(e) => setDbPath(e.target.value)}
-            />
-            {!LOCAL ? (
-              <div className="p" style={{ marginTop: 6, fontSize: 12, opacity: 0.9 }}>
-                배포 환경에서는 public DB만 사용합니다.
-              </div>
-            ) : null}
+            <input className="input" value={dbPath} onChange={(e) => setDbPath(e.target.value)} />
           </div>
 
           <div style={{ width: 170 }}>
@@ -980,7 +1022,7 @@ export default function RecommendPage() {
         {candidateMode === "POOL" ? (
           <div className="card">
             <div className="h2">Champ Pool</div>
-            <div className="p">한글 이름으로 추가 가능. 내부는 championId로 저장/전송.</div>
+            <div className="p">한글 이름(또는 숫자 ID)로 추가 가능. 내부는 championId로 저장/전송.</div>
 
             <div className="row" style={{ marginTop: 8 }}>
               <input
@@ -988,29 +1030,30 @@ export default function RecommendPage() {
                 style={{ flex: 1, minWidth: 260 }}
                 value={poolName}
                 onChange={(e) => setPoolName(e.target.value)}
-                placeholder="예: 아리 / 애니 / 오리아나 ..."
+                placeholder="예: 아리 / 애니 / 오리아나 ... 또는 103"
                 onKeyDown={(e) => {
                   if (e.key !== "Enter") return;
                   e.preventDefault();
-                  const { id, candidates } = resolveChampionIdByName(poolName, { nameToId, normToId });
-                  if (id) {
-                    addIdToText(setChampPoolText, champPoolText, id);
-                    setPoolName("");
-                  } else if (candidates?.length) {
-                    setNameHints({ kind: "pool", cands: candidates });
-                  }
+
+                  addByNameOrHint({
+                    kind: "pool",
+                    role: "",
+                    input: poolName,
+                    clearInput: setPoolName,
+                    addByIdFallback: (cid) => addIdToText(setChampPoolText, champPoolText, cid),
+                  });
                 }}
               />
               <button
                 className="btn"
                 onClick={() => {
-                  const { id, candidates } = resolveChampionIdByName(poolName, { nameToId, normToId });
-                  if (id) {
-                    addIdToText(setChampPoolText, champPoolText, id);
-                    setPoolName("");
-                  } else if (candidates?.length) {
-                    setNameHints({ kind: "pool", cands: candidates });
-                  }
+                  addByNameOrHint({
+                    kind: "pool",
+                    role: "",
+                    input: poolName,
+                    clearInput: setPoolName,
+                    addByIdFallback: (cid) => addIdToText(setChampPoolText, champPoolText, cid),
+                  });
                 }}
               >
                 추가
@@ -1056,12 +1099,40 @@ export default function RecommendPage() {
 
             <div className="k">phase</div>
             <div className="v">{phase}</div>
+
+            <div className="k">input mode</div>
+            <div className="v">{manualInput ? "MANUAL(수동)" : "AUTO(브릿지)"}</div>
           </div>
 
           <div style={{ height: 10 }} />
           <div className="row">
             <button className="btn" onClick={() => refreshBridgeHealth({ silent: false })}>Health now</button>
             <button className="btn" onClick={pullBridgeStateOnce}>Pull state once</button>
+
+            <button
+              className="btn"
+              onClick={() => {
+                setManualInput(false);
+                setAutoPull(true);
+              }}
+              style={{ background: !manualInput ? "rgba(120,140,255,0.25)" : undefined }}
+              title="브릿지 Pull 결과로 bans/enemy/ally가 자동 반영됩니다."
+            >
+              자동 입력
+            </button>
+
+            <button
+              className="btn"
+              onClick={() => {
+                setManualInput(true);
+                setAutoPull(true); // 상태는 계속 보되(phase), 입력값은 덮어쓰지 않음
+              }}
+              style={{ background: manualInput ? "rgba(120,140,255,0.25)" : undefined }}
+              title="수동 입력으로 전환하면 브릿지가 입력값을 덮어쓰지 않습니다."
+            >
+              수동 입력
+            </button>
+
             <label className="p" style={{ display: "flex", alignItems: "center", gap: 8, margin: 0 }}>
               <input type="checkbox" checked={autoPull} onChange={(e) => setAutoPull(e.target.checked)} />
               자동 Pull (state: 1.2s)
@@ -1072,19 +1143,73 @@ export default function RecommendPage() {
             </label>
           </div>
 
+          {manualInput ? (
+            <div className="p" style={{ marginTop: 8, fontWeight: 900 }}>
+              ✅ 수동 입력 모드: 브릿지는 phase/state만 갱신하고, 밴/픽 입력값은 덮어쓰지 않습니다.
+            </div>
+          ) : (
+            <div className="p" style={{ marginTop: 8, fontWeight: 900 }}>
+              ✅ 자동 입력 모드: 브릿지 Pull 결과가 밴/적/아군 입력에 자동 반영됩니다.
+            </div>
+          )}
+
           {showRawState && lastState ? <div className="pre">{JSON.stringify(lastState, null, 2)}</div> : null}
         </div>
 
         <div style={{ height: 12 }} />
 
+        {/* 수동 입력 UI */}
         <div className="row">
           <div className="card" style={{ flex: 1, minWidth: 320 }}>
             <div className="h2">Bans</div>
+
+            {manualInput ? (
+              <div className="row" style={{ marginTop: 8 }}>
+                <input
+                  className="input"
+                  style={{ flex: 1, minWidth: 240 }}
+                  value={banName}
+                  onChange={(e) => setBanName(e.target.value)}
+                  placeholder="밴 챔프: 이름(한글) 또는 ID"
+                  onKeyDown={(e) => {
+                    if (e.key !== "Enter") return;
+                    e.preventDefault();
+                    addByNameOrHint({
+                      kind: "bans",
+                      role: "",
+                      input: banName,
+                      clearInput: setBanName,
+                      addByIdFallback: (cid) => addIdToText(setBansText, bansText, cid),
+                    });
+                  }}
+                />
+                <button
+                  className="btn"
+                  onClick={() => {
+                    addByNameOrHint({
+                      kind: "bans",
+                      role: "",
+                      input: banName,
+                      clearInput: setBanName,
+                      addByIdFallback: (cid) => addIdToText(setBansText, bansText, cid),
+                    });
+                  }}
+                >
+                  추가
+                </button>
+              </div>
+            ) : (
+              <div className="p" style={{ marginTop: 6 }}>
+                (자동 입력 모드) — 브릿지 Pull로 자동 반영됩니다. 수동으로 넣으려면 <b>수동 입력</b>으로 전환하세요.
+              </div>
+            )}
+
             {renderIdChips({
               ids: parseIds(bansText),
               idToName,
               onRemove: (cid) => removeIdFromText(setBansText, bansText, cid),
             })}
+
             {showAdvanced ? (
               <div style={{ marginTop: 10 }}>
                 <div className="p" style={{ fontWeight: 800 }}>bans (IDs)</div>
@@ -1095,11 +1220,54 @@ export default function RecommendPage() {
 
           <div className="card" style={{ flex: 1, minWidth: 320 }}>
             <div className="h2">Enemy</div>
+
+            {manualInput ? (
+              <div className="row" style={{ marginTop: 8 }}>
+                <input
+                  className="input"
+                  style={{ flex: 1, minWidth: 240 }}
+                  value={enemyName}
+                  onChange={(e) => setEnemyName(e.target.value)}
+                  placeholder="적 챔프: 이름(한글) 또는 ID"
+                  onKeyDown={(e) => {
+                    if (e.key !== "Enter") return;
+                    e.preventDefault();
+                    addByNameOrHint({
+                      kind: "enemy",
+                      role: "",
+                      input: enemyName,
+                      clearInput: setEnemyName,
+                      addByIdFallback: (cid) => addIdToText(setEnemyText, enemyText, cid),
+                    });
+                  }}
+                />
+                <button
+                  className="btn"
+                  onClick={() => {
+                    addByNameOrHint({
+                      kind: "enemy",
+                      role: "",
+                      input: enemyName,
+                      clearInput: setEnemyName,
+                      addByIdFallback: (cid) => addIdToText(setEnemyText, enemyText, cid),
+                    });
+                  }}
+                >
+                  추가
+                </button>
+              </div>
+            ) : (
+              <div className="p" style={{ marginTop: 6 }}>
+                (자동 입력 모드) — 브릿지 Pull로 자동 반영됩니다. 수동으로 넣으려면 <b>수동 입력</b>으로 전환하세요.
+              </div>
+            )}
+
             {renderIdChips({
               ids: parseIds(enemyText),
               idToName,
               onRemove: (cid) => removeIdFromText(setEnemyText, enemyText, cid),
             })}
+
             {showAdvanced ? (
               <div style={{ marginTop: 10 }}>
                 <div className="p" style={{ fontWeight: 800 }}>enemy_picks (IDs)</div>
@@ -1113,7 +1281,7 @@ export default function RecommendPage() {
 
         <div className="card">
           <div className="h2">Ally Picks (by role)</div>
-          <div className="p">브릿지 Pull로 들어오면 자동 반영되며, 그대로 저장됩니다.</div>
+          <div className="p">자동 모드에선 브릿지 Pull로 반영. 수동 모드에선 아래 입력으로 추가/제거.</div>
 
           <div style={{ marginTop: 10 }}>
             {ROLES.map((r) => (
@@ -1122,19 +1290,79 @@ export default function RecommendPage() {
                   <div className="h2" style={{ margin: 0 }}>
                     {ROLE_KO[r]} ({r})
                   </div>
-                  <button
-                    className="btn"
-                    onClick={() => {
-                      setAllyByRole((prev) => {
-                        const next = { ...prev };
-                        next[r] = [];
-                        return next;
-                      });
-                    }}
-                  >
-                    Clear
-                  </button>
+                  <div className="row">
+                    <button
+                      className="btn"
+                      onClick={() => {
+                        setAllyByRole((prev) => {
+                          const next = { ...prev };
+                          next[r] = [];
+                          return next;
+                        });
+                      }}
+                    >
+                      Clear
+                    </button>
+                  </div>
                 </div>
+
+                {manualInput ? (
+                  <div className="row" style={{ marginTop: 8 }}>
+                    <input
+                      className="input"
+                      style={{ flex: 1, minWidth: 240 }}
+                      value={allyNameByRole?.[r] || ""}
+                      onChange={(e) => setAllyNameByRole((prev) => ({ ...prev, [r]: e.target.value }))}
+                      placeholder="아군 챔프: 이름(한글) 또는 ID"
+                      onKeyDown={(e) => {
+                        if (e.key !== "Enter") return;
+                        e.preventDefault();
+
+                        const input = allyNameByRole?.[r] || "";
+                        addByNameOrHint({
+                          kind: "ally",
+                          role: r,
+                          input,
+                          clearInput: (v) => setAllyNameByRole((prev) => ({ ...prev, [r]: v })),
+                          addByIdFallback: (cid) =>
+                            setAllyByRole((prev) => {
+                              const next = { ...prev };
+                              const arr = Array.isArray(next[r]) ? [...next[r]] : [];
+                              if (!arr.includes(cid)) arr.push(cid);
+                              next[r] = arr;
+                              return next;
+                            }),
+                        });
+                      }}
+                    />
+                    <button
+                      className="btn"
+                      onClick={() => {
+                        const input = allyNameByRole?.[r] || "";
+                        addByNameOrHint({
+                          kind: "ally",
+                          role: r,
+                          input,
+                          clearInput: (v) => setAllyNameByRole((prev) => ({ ...prev, [r]: v })),
+                          addByIdFallback: (cid) =>
+                            setAllyByRole((prev) => {
+                              const next = { ...prev };
+                              const arr = Array.isArray(next[r]) ? [...next[r]] : [];
+                              if (!arr.includes(cid)) arr.push(cid);
+                              next[r] = arr;
+                              return next;
+                            }),
+                        });
+                      }}
+                    >
+                      추가
+                    </button>
+                  </div>
+                ) : (
+                  <div className="p" style={{ marginTop: 6 }}>
+                    (자동 입력 모드) — 수동 입력 UI는 숨김. <b>수동 입력</b>으로 전환하면 추가 입력이 나타납니다.
+                  </div>
+                )}
 
                 {renderIdChips({
                   ids: allyByRole?.[r] || [],
@@ -1175,13 +1403,7 @@ export default function RecommendPage() {
           <div className="row">
             <div style={{ width: 180 }}>
               <div className="p" style={{ fontWeight: 800 }}>min_games</div>
-              <input
-                className="input"
-                type="number"
-                min="1"
-                value={minGames}
-                onChange={(e) => setMinGames(e.target.value)}
-              />
+              <input className="input" type="number" min="1" value={minGames} onChange={(e) => setMinGames(e.target.value)} />
               <div className="p" style={{ marginTop: 6, fontSize: 12, opacity: 0.9 }}>
                 백엔드 검증 때문에 1 이상만 전송됩니다.
               </div>
