@@ -101,20 +101,6 @@ def _clamp(x: float, lo: float, hi: float) -> float:
     return lo if x < lo else hi if x > hi else x
 
 
-def _safe_int(x: Any, default: int = 0) -> int:
-    try:
-        return int(x)
-    except Exception:
-        return default
-
-
-def _safe_float(x: Any, default: float = 0.0) -> float:
-    try:
-        return float(x)
-    except Exception:
-        return default
-
-
 # -------------------------
 # patch helpers
 # -------------------------
@@ -177,6 +163,25 @@ def guess_enemy_roles(enemy_ids: List[int], dist: Dict[int, Dict[str, int]]) -> 
     return out
 
 
+def guess_enemy_roles_detail(enemy_ids: List[int], dist: Dict[int, Dict[str, int]]) -> Dict[int, Dict[str, Any]]:
+    """
+    champ_id -> { role, top_games, total_games, top_share }
+    """
+    out: Dict[int, Dict[str, Any]] = {}
+    for cid0 in enemy_ids or []:
+        cid = int(cid0)
+        m = dist.get(cid) or {}
+        if not m:
+            out[cid] = {"role": "UNKNOWN", "top_games": 0, "total_games": 0, "top_share": 0.0}
+            continue
+        total = int(sum(int(v or 0) for v in m.values()) or 0)
+        role, top = max(m.items(), key=lambda kv: kv[1])
+        top_i = int(top or 0)
+        share = (top_i / total) if total > 0 else 0.0
+        out[cid] = {"role": str(role).upper(), "top_games": top_i, "total_games": total, "top_share": float(share)}
+    return out
+
+
 # -------------------------
 # core recommender
 # -------------------------
@@ -197,7 +202,7 @@ def recommend_champions(
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     return: (recs, meta)
-    meta.reason: 디버깅용
+    meta.reason: 디버깅용 + ✅ enemy role guess도 포함
     """
     con = sqlite3.connect(db_path, check_same_thread=False)
     try:
@@ -377,10 +382,14 @@ def recommend_champions(
                             synergy_samples[my_cid] += g
 
         # -------------------------
-        # 4) counter: ✅ SUM/GROUP BY로 폭발 방지
+        # 4) counter: ✅ SUM/GROUP BY로 폭발 방지 + ✅ enemy role guess meta 제공
         # -------------------------
         counter_delta: Dict[int, float] = defaultdict(float)
         counter_samples: Dict[int, int] = defaultdict(int)
+
+        enemy_role_guess: Dict[int, str] = {}
+        enemy_role_guess_detail: Dict[int, Dict[str, Any]] = {}
+        used_enemy_role_column = False
 
         if _table_exists(con, "agg_matchup_role"):
             mc = _cols(con, "agg_matchup_role")
@@ -391,13 +400,19 @@ def recommend_champions(
 
             if my_role_col and my_c_col and e_c_col:
                 dist = champ_role_distribution(con, patch, tier)
-                guessed = guess_enemy_roles([int(x) for x in (enemy_picks or [])], dist)
+                enemy_ids_int = [int(x) for x in (enemy_picks or [])]
+                guessed = guess_enemy_roles(enemy_ids_int, dist)
+                detail = guess_enemy_roles_detail(enemy_ids_int, dist)
 
-                for e_cid in (enemy_picks or []):
-                    e_cid = int(e_cid)
+                enemy_role_guess = guessed
+                enemy_role_guess_detail = detail
+
+                for e_cid0 in (enemy_picks or []):
+                    e_cid = int(e_cid0)
                     e_role = guessed.get(e_cid, "UNKNOWN")
 
                     if enemy_role_col and e_role != "UNKNOWN":
+                        used_enemy_role_column = True
                         q_ct = f"""
                           SELECT {my_c_col} AS my_cid, SUM(games) AS games, SUM(wins) AS wins
                           FROM agg_matchup_role
@@ -469,6 +484,10 @@ def recommend_champions(
 
         recs.sort(key=lambda x: (x["final_score"], x["games"]), reverse=True)
 
+        # JSON 친화적으로 key를 문자열로 내려줌(프론트에서 안정적)
+        enemy_role_guess_s: Dict[str, str] = {str(k): str(v) for k, v in (enemy_role_guess or {}).items()}
+        enemy_role_guess_detail_s: Dict[str, Dict[str, Any]] = {str(k): v for k, v in (enemy_role_guess_detail or {}).items()}
+
         meta = {
             "reason": "ok",
             "role_used": my_role_db,
@@ -481,6 +500,11 @@ def recommend_champions(
             "candidates_requested": int(len(candidates)),
             "base_rows_after_min_games": int(len(base_map)),
             "used_fallback_roleless": bool(used_fallback_roleless),
+
+            # ✅ NEW: enemy role guess
+            "enemy_role_guess": enemy_role_guess_s,
+            "enemy_role_guess_detail": enemy_role_guess_detail_s,
+            "used_enemy_role_column": bool(used_enemy_role_column),
         }
 
         return recs[: int(top_n)], meta

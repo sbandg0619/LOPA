@@ -366,6 +366,109 @@ function extractConfirmedFromActions(state, { myRole }) {
   };
 }
 
+/**
+ * ✅ NEW: enemy role guess UI helper
+ */
+function formatPct01(x) {
+  const n = Number(x);
+  if (!Number.isFinite(n)) return "(n/a)";
+  return `${(n * 100).toFixed(1)}%`;
+}
+
+function renderEnemyRoleGuessCard({ apiRaw, enemyIds, idToName }) {
+  const meta = apiRaw?.meta || {};
+  const guess = meta?.enemy_role_guess || meta?.enemyRoleGuess || null;
+  const detail = meta?.enemy_role_guess_detail || meta?.enemyRoleGuessDetail || null;
+  const usedRoleCol = Boolean(meta?.used_enemy_role_column ?? meta?.usedEnemyRoleColumn);
+
+  const hasGuess = guess && typeof guess === "object" && Object.keys(guess).length > 0;
+  const ids = Array.isArray(enemyIds) && enemyIds.length ? enemyIds : [];
+
+  if (!apiRaw) {
+    return (
+      <div className="card" style={{ marginTop: 12 }}>
+        <div className="h2">Enemy Role Guess</div>
+        <div className="p">(아직 /recommend 실행 전)</div>
+      </div>
+    );
+  }
+
+  if (!ids.length) {
+    return (
+      <div className="card" style={{ marginTop: 12 }}>
+        <div className="h2">Enemy Role Guess</div>
+        <div className="p">(enemy 픽이 없어서 표시할 게 없음)</div>
+      </div>
+    );
+  }
+
+  if (!hasGuess) {
+    return (
+      <div className="card" style={{ marginTop: 12 }}>
+        <div className="h2">Enemy Role Guess</div>
+        <div className="p">
+          (meta에 enemy_role_guess가 없음) — 백엔드 recommender.py에서 meta로 내려주도록 수정이 필요함.
+        </div>
+      </div>
+    );
+  }
+
+  const rows = ids.map((cid) => {
+    const k = String(cid);
+    const role = String(guess?.[k] || "UNKNOWN");
+    const d = detail?.[k] || {};
+    const share = d?.top_share ?? d?.topShare;
+    const total = d?.total_games ?? d?.totalGames;
+    const top = d?.top_games ?? d?.topGames;
+    return {
+      cid,
+      name: idToName?.[cid] || "UNKNOWN",
+      role,
+      share,
+      total,
+      top,
+    };
+  });
+
+  const roleOrder = { TOP: 1, JUNGLE: 2, MIDDLE: 3, BOTTOM: 4, UTILITY: 5, UNKNOWN: 99 };
+  rows.sort((a, b) => {
+    const ra = roleOrder[a.role] ?? 98;
+    const rb = roleOrder[b.role] ?? 98;
+    if (ra !== rb) return ra - rb;
+    return (a.cid || 0) - (b.cid || 0);
+  });
+
+  return (
+    <div className="card" style={{ marginTop: 12 }}>
+      <div className="h2">Enemy Role Guess</div>
+      <div className="p" style={{ marginTop: 0 }}>
+        used enemy_role column: <b>{usedRoleCol ? "YES" : "NO"}</b> — (role이 UNKNOWN이면 role 없는 매치업 쿼리로 fallback)
+      </div>
+
+      <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
+        {rows.map((r) => (
+          <div key={`enemy_guess_${r.cid}`} className="card" style={{ background: "rgba(255,255,255,0.02)" }}>
+            <div className="row" style={{ justifyContent: "space-between" }}>
+              <div style={{ fontWeight: 900 }}>
+                {r.name} <span className="p">({r.cid})</span>
+              </div>
+              <div style={{ fontWeight: 900 }}>
+                {ROLE_KO[r.role] ? `${ROLE_KO[r.role]} (${r.role})` : r.role}
+              </div>
+            </div>
+            <div className="p" style={{ marginTop: 6 }}>
+              confidence(share): <b>{formatPct01(r.share)}</b>{" "}
+              <span style={{ opacity: 0.9 }}>
+                — top/total games: {Number.isFinite(Number(r.top)) ? r.top : "(n/a)"} / {Number.isFinite(Number(r.total)) ? r.total : "(n/a)"}
+              </span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function RecommendPage() {
   const [bridgeBase, setBridgeBase] = useState("");
   const [bridgeToken, setBridgeToken] = useState("");
@@ -1009,6 +1112,9 @@ export default function RecommendPage() {
 
           {metaErr ? <div style={{ marginTop: 10, fontWeight: 900 }}>❌ meta error: {metaErr}</div> : null}
         </div>
+
+        {/* ✅ NEW: Enemy Role Guess 표시 */}
+        {renderEnemyRoleGuessCard({ apiRaw, enemyIds, idToName })}
 
         <div className="card" style={{ marginTop: 12 }}>
           <div className="h2">Top Recommendation</div>
