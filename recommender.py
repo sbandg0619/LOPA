@@ -40,16 +40,22 @@ def _cols(con: sqlite3.Connection, table: str) -> List[str]:
 
 
 def _normalize_role_with_db(con: sqlite3.Connection, role: str) -> str:
+    """
+    입력 role을 DB에 실제 존재하는 role 값으로 최대한 맞춰줌.
+    - DB(agg_champ_role.role)에 있는 distinct 값을 보고 매칭
+    """
     r = (role or "").upper().strip()
     if not r:
         return "MIDDLE"
 
+    # DB에 존재하는 role 값 수집
     db_roles = set()
     if _table_exists(con, "agg_champ_role"):
         for (x,) in con.execute("SELECT DISTINCT role FROM agg_champ_role WHERE role IS NOT NULL"):
             if x:
                 db_roles.add(str(x).upper())
 
+    # 후보 동의어
     syn = {
         "MIDDLE": ["MIDDLE", "MID"],
         "MID": ["MID", "MIDDLE"],
@@ -64,13 +70,16 @@ def _normalize_role_with_db(con: sqlite3.Connection, role: str) -> str:
         "TOP": ["TOP"],
     }
 
+    # 1) 그대로 있으면 OK
     if not db_roles or r in db_roles:
         return r
 
+    # 2) 동의어 중 DB에 있는 걸로
     for cand in syn.get(r, [r]):
         if cand in db_roles:
             return cand
 
+    # 3) 표준 ROLES에서 가장 그럴싸한 값
     if r in syn:
         for cand in syn[r]:
             if cand in ROLES:
@@ -80,10 +89,15 @@ def _normalize_role_with_db(con: sqlite3.Connection, role: str) -> str:
 
 
 def _patch_condition(patch: str) -> Tuple[str, Tuple[Any, ...]]:
+    """
+    patch='ALL'이면 조건을 안 거는 형태로 만들기 위해
+    WHERE ( ?='ALL' OR patch=? )
+    """
     return "(?='ALL' OR patch=?)", (patch, patch)
 
 
 def _tier_condition(tier: str) -> Tuple[str, Tuple[Any, ...]]:
+    # tier가 NULL인 데이터도 허용(기존 로직 유지)
     return "(?='ALL' OR tier=? OR tier IS NULL)", (tier, tier)
 
 
@@ -108,6 +122,9 @@ def get_available_patches(con: sqlite3.Connection) -> List[str]:
 # enemy role guess (optional)
 # -------------------------
 def champ_role_distribution(con: sqlite3.Connection, patch: str, tier: str) -> Dict[int, Dict[str, int]]:
+    """
+    champ_id -> {role -> games}
+    """
     dist: Dict[int, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
     if not _table_exists(con, "agg_champ_role"):
         return dist
@@ -140,63 +157,6 @@ def guess_enemy_roles(enemy_ids: List[int], dist: Dict[int, Dict[str, int]]) -> 
 
 
 # -------------------------
-# candidate selection (pick rate)
-# -------------------------
-def _pickrate_candidates(
-    con: sqlite3.Connection,
-    patch: str,
-    tier: str,
-    role: str,
-    min_pick_rate: float,
-    max_candidates: int,
-    banset: set,
-) -> List[int]:
-    """
-    champ_pool이 비어있을 때(전체 후보 모드),
-    role 기준으로 pickrate >= min_pick_rate 인 챔프 후보를 뽑는다.
-    """
-    if not _table_exists(con, "agg_champ_role"):
-        return []
-
-    patch_sql, patch_args = _patch_condition(patch)
-    tier_sql, tier_args = _tier_condition(tier)
-
-    # total games
-    q_total = f"""
-      SELECT SUM(games)
-      FROM agg_champ_role
-      WHERE role=? AND {patch_sql} AND {tier_sql}
-    """
-    total = con.execute(q_total, (role, *patch_args, *tier_args)).fetchone()
-    total_games = int(total[0] or 0) if total else 0
-    if total_games <= 0:
-        return []
-
-    q = f"""
-      SELECT champ_id, SUM(games) AS g
-      FROM agg_champ_role
-      WHERE role=? AND {patch_sql} AND {tier_sql}
-      GROUP BY champ_id
-      ORDER BY g DESC
-      LIMIT ?
-    """
-    rows = con.execute(q, (role, *patch_args, *tier_args, int(max_candidates) * 3)).fetchall()
-
-    out: List[int] = []
-    for cid, g in rows:
-        cid = int(cid or 0)
-        if cid == 0 or cid in banset:
-            continue
-        gg = int(g or 0)
-        pr = gg / float(total_games)
-        if pr >= float(min_pick_rate):
-            out.append(cid)
-        if len(out) >= int(max_candidates):
-            break
-    return out
-
-
-# -------------------------
 # core recommender
 # -------------------------
 def recommend_champions(
@@ -209,85 +169,150 @@ def recommend_champions(
     ally_picks_by_role: Dict[str, List[int]],
     enemy_picks: List[int],
     min_games: int = 30,
-    min_pick_rate: float = 0.005,
     top_n: int = 10,
+    # 아래는 네가 이미 API에서 쓰고 있는 값(응답 meta에 보이던 값들)
+    min_pick_rate: float = 0.005,   # 0.5% 기본
     max_candidates: int = 400,
-) -> Tuple[List[Dict[str, Any]], str]:
+    use_pool: bool = True,
+) -> List[Dict[str, Any]]:
     """
-    return: (recs, reason)
-    reason은 web에서 디버그/표시용.
+    - patch/tier가 ALL일 때 patch/tier별 행이 중복 누적되며 점수가 폭발하던 문제를 해결:
+      base/synergy/counter 모두 SUM + GROUP BY로 "통합 1행"으로 만든 뒤 계산.
+    - synergy/counter는 (wr - base_wr)를 games로 가중평균하여 스케일을 안정화.
     """
+
     con = sqlite3.connect(db_path, check_same_thread=False)
     try:
         if not _table_exists(con, "agg_champ_role"):
-            return [], "missing table agg_champ_role"
+            return []
 
         my_role_db = _normalize_role_with_db(con, my_role)
-
-        banset = set(int(x) for x in (bans or []))
-
-        pool = [int(x) for x in (champ_pool or []) if int(x) != 0]
-        pool = [x for x in pool if x not in banset]
-
-        # ✅ 전체 후보 모드: champ_pool이 비어있으면 pickrate 기반 후보 생성
-        if not pool:
-            pool = _pickrate_candidates(
-                con=con,
-                patch=patch,
-                tier=tier,
-                role=my_role_db,
-                min_pick_rate=min_pick_rate,
-                max_candidates=max_candidates,
-                banset=banset,
-            )
-            if not pool:
-                return [], "empty candidates (pool empty & pickrate filter too strict or no data)"
 
         patch_sql, patch_args = _patch_condition(patch)
         tier_sql, tier_args = _tier_condition(tier)
 
-        # ---- base
+        banset = set(int(x) for x in (bans or []))
+
+        # -------------------------
+        # 후보군(candidates) 결정
+        # -------------------------
+        candidates: List[int] = []
+
+        if use_pool:
+            pool = [int(x) for x in (champ_pool or [])]
+            pool = [x for x in pool if x != 0 and x not in banset]
+            # pool 모드면 비어있으면 추천 불가
+            if not pool:
+                return []
+            candidates = pool[:]
+        else:
+            # 전체 후보 모드: my_role 기준으로 픽률(min_pick_rate) 이상인 챔프를 candidates로 구성
+            # total_role_games를 먼저 구해 픽률 계산
+            q_total = f"""
+              SELECT COALESCE(SUM(games), 0)
+              FROM agg_champ_role
+              WHERE role=?
+                AND {patch_sql}
+                AND {tier_sql}
+            """
+            total_role_games = int(con.execute(q_total, (my_role_db, *patch_args, *tier_args)).fetchone()[0] or 0)
+
+            if total_role_games <= 0:
+                # role 데이터가 거의 없으면 role 조건을 풀어 전체 기준으로라도 후보를 구성
+                q_total2 = f"""
+                  SELECT COALESCE(SUM(games), 0)
+                  FROM agg_champ_role
+                  WHERE {patch_sql}
+                    AND {tier_sql}
+                """
+                total_role_games = int(con.execute(q_total2, (*patch_args, *tier_args)).fetchone()[0] or 0)
+
+                q_cand2 = f"""
+                  SELECT champ_id, COALESCE(SUM(games),0) AS g
+                  FROM agg_champ_role
+                  WHERE {patch_sql}
+                    AND {tier_sql}
+                  GROUP BY champ_id
+                  ORDER BY g DESC
+                  LIMIT ?
+                """
+                rows = con.execute(q_cand2, (*patch_args, *tier_args, int(max_candidates))).fetchall()
+            else:
+                # role 기준 후보
+                q_cand = f"""
+                  SELECT champ_id, COALESCE(SUM(games),0) AS g
+                  FROM agg_champ_role
+                  WHERE role=?
+                    AND {patch_sql}
+                    AND {tier_sql}
+                  GROUP BY champ_id
+                  ORDER BY g DESC
+                  LIMIT ?
+                """
+                rows = con.execute(q_cand, (my_role_db, *patch_args, *tier_args, int(max_candidates))).fetchall()
+
+            for cid, g in rows:
+                cid = int(cid)
+                g = int(g or 0)
+                if cid == 0 or cid in banset:
+                    continue
+                # 픽률 필터: total_role_games가 0이면 그냥 통과
+                if total_role_games > 0:
+                    pr = g / float(total_role_games)
+                    if pr < float(min_pick_rate):
+                        continue
+                candidates.append(cid)
+
+            if not candidates:
+                return []
+
+        # -------------------------
+        # base: 기본 승률/하한 (항상 GROUP BY로 통합)
+        # -------------------------
+        placeholders = ",".join(["?"] * len(candidates))
+
         q_base = f"""
-          SELECT champ_id, games, wins
+          SELECT champ_id, COALESCE(SUM(games),0) AS games, COALESCE(SUM(wins),0) AS wins
           FROM agg_champ_role
           WHERE role=?
             AND {patch_sql}
             AND {tier_sql}
-            AND games >= ?
-            AND champ_id IN ({",".join(["?"] * len(pool))})
+            AND champ_id IN ({placeholders})
+          GROUP BY champ_id
+          HAVING games >= ?
         """
-        args_base = (my_role_db, *patch_args, *tier_args, int(min_games), *pool)
+        args_base = (my_role_db, *patch_args, *tier_args, *candidates, int(min_games))
         rows = con.execute(q_base, args_base).fetchall()
 
-        # role이 너무 빡세면 느슨하게
+        # role별 데이터가 없으면 role 조건을 한 번 풀어보기(기존 안정장치 유지)
         if not rows:
             q_base2 = f"""
-              SELECT champ_id, SUM(games) AS games, SUM(wins) AS wins
+              SELECT champ_id, COALESCE(SUM(games),0) AS games, COALESCE(SUM(wins),0) AS wins
               FROM agg_champ_role
               WHERE {patch_sql}
                 AND {tier_sql}
-                AND champ_id IN ({",".join(["?"] * len(pool))})
+                AND champ_id IN ({placeholders})
               GROUP BY champ_id
               HAVING games >= ?
             """
-            args_base2 = (*patch_args, *tier_args, *pool, int(min_games))
+            args_base2 = (*patch_args, *tier_args, *candidates, int(min_games))
             rows = con.execute(q_base2, args_base2).fetchall()
 
-        # 최후: min_games 무시
+        # 최후: min_games를 무시하고라도 base를 구성(기존 안정장치 유지)
         if not rows:
             q_base3 = f"""
-              SELECT champ_id, SUM(games) AS games, SUM(wins) AS wins
+              SELECT champ_id, COALESCE(SUM(games),0) AS games, COALESCE(SUM(wins),0) AS wins
               FROM agg_champ_role
               WHERE {patch_sql}
                 AND {tier_sql}
-                AND champ_id IN ({",".join(["?"] * len(pool))})
+                AND champ_id IN ({placeholders})
               GROUP BY champ_id
             """
-            args_base3 = (*patch_args, *tier_args, *pool)
+            args_base3 = (*patch_args, *tier_args, *candidates)
             rows = con.execute(q_base3, args_base3).fetchall()
 
         if not rows:
-            return [], "no base rows (after relax)"
+            return []
 
         base_map: Dict[int, Dict[str, Any]] = {}
         for cid, g, w in rows:
@@ -301,83 +326,33 @@ def recommend_champions(
             base_map[cid] = {"games": g, "wins": w, "base_wr": wr, "base_lb": lb}
 
         if not base_map:
-            return [], "base_map empty"
+            return []
 
-        # ---- synergy
-        synergy_delta: Dict[int, float] = defaultdict(float)
-        synergy_samples: Dict[int, int] = defaultdict(int)
+        # -------------------------
+        # synergy: 가중 평균으로 안정화 (SUM+GROUP BY로 통합)
+        # -------------------------
+        synergy_sum_wdelta: Dict[int, float] = defaultdict(float)  # sum((wr-base_wr) * games)
+        synergy_sum_games: Dict[int, int] = defaultdict(int)       # sum(games)
 
         if _table_exists(con, "agg_synergy_role"):
-            sc = _cols(con, "agg_synergy_role")
-            my_role_col = "my_role" if "my_role" in sc else ("role" if "role" in sc else None)
-            ally_role_col = "ally_role" if "ally_role" in sc else ("other_role" if "other_role" in sc else None)
-            my_c_col = "my_champ_id" if "my_champ_id" in sc else ("champ_id" if "champ_id" in sc else None)
-            ally_c_col = "ally_champ_id" if "ally_champ_id" in sc else ("other_champ_id" if "other_champ_id" in sc else None)
+            # 스키마 확정: patch,tier,my_role,ally_role,my_champ_id,ally_champ_id,games,wins
+            for ally_role, ally_list in (ally_picks_by_role or {}).items():
+                ally_role_u = _normalize_role_with_db(con, ally_role)
+                for ally_cid in ally_list or []:
+                    ally_cid = int(ally_cid)
+                    if ally_cid == 0:
+                        continue
 
-            if my_role_col and my_c_col and ally_c_col:
-                for ally_role, ally_list in (ally_picks_by_role or {}).items():
-                    ally_role_u = _normalize_role_with_db(con, ally_role)
-                    for ally_cid in ally_list or []:
-                        ally_cid = int(ally_cid)
-                        q_syn = f"""
-                          SELECT {my_c_col}, games, wins
-                          FROM agg_synergy_role
-                          WHERE {my_role_col}=? AND {ally_c_col}=?
-                            AND {patch_sql} AND {tier_sql}
-                        """
-                        syn_args = [my_role_db, ally_cid, *patch_args, *tier_args]
-                        if ally_role_col:
-                            q_syn = q_syn.replace("WHERE", "WHERE " + ally_role_col + "=? AND ", 1)
-                            syn_args = [ally_role_u] + syn_args
+                    q_syn = f"""
+                      SELECT my_champ_id, COALESCE(SUM(games),0) AS g, COALESCE(SUM(wins),0) AS w
+                      FROM agg_synergy_role
+                      WHERE my_role=? AND ally_role=? AND ally_champ_id=?
+                        AND {patch_sql} AND {tier_sql}
+                      GROUP BY my_champ_id
+                    """
+                    syn_args = (my_role_db, ally_role_u, ally_cid, *patch_args, *tier_args)
 
-                        for my_cid, g, w in con.execute(q_syn, tuple(syn_args)).fetchall():
-                            my_cid = int(my_cid)
-                            if my_cid not in base_map:
-                                continue
-                            g = int(g or 0)
-                            w = int(w or 0)
-                            if g <= 0:
-                                continue
-                            wr = 100.0 * (w / g)
-                            synergy_delta[my_cid] += (wr - base_map[my_cid]["base_wr"])
-                            synergy_samples[my_cid] += g
-
-        # ---- counter
-        counter_delta: Dict[int, float] = defaultdict(float)
-        counter_samples: Dict[int, int] = defaultdict(int)
-
-        if _table_exists(con, "agg_matchup_role"):
-            mc = _cols(con, "agg_matchup_role")
-            my_role_col = "my_role" if "my_role" in mc else ("role" if "role" in mc else None)
-            enemy_role_col = "enemy_role" if "enemy_role" in mc else None
-            my_c_col = "my_champ_id" if "my_champ_id" in mc else ("champ_id" if "champ_id" in mc else None)
-            e_c_col = "enemy_champ_id" if "enemy_champ_id" in mc else ("other_champ_id" if "other_champ_id" in mc else None)
-
-            if my_role_col and my_c_col and e_c_col:
-                dist = champ_role_distribution(con, patch, tier)
-                guessed = guess_enemy_roles([int(x) for x in (enemy_picks or [])], dist)
-
-                for e_cid in (enemy_picks or []):
-                    e_cid = int(e_cid)
-                    e_role = guessed.get(e_cid, "UNKNOWN")
-                    if enemy_role_col and e_role != "UNKNOWN":
-                        q_ct = f"""
-                          SELECT {my_c_col}, games, wins
-                          FROM agg_matchup_role
-                          WHERE {my_role_col}=? AND {enemy_role_col}=? AND {e_c_col}=?
-                            AND {patch_sql} AND {tier_sql}
-                        """
-                        args_ct = (my_role_db, e_role, e_cid, *patch_args, *tier_args)
-                    else:
-                        q_ct = f"""
-                          SELECT {my_c_col}, games, wins
-                          FROM agg_matchup_role
-                          WHERE {my_role_col}=? AND {e_c_col}=?
-                            AND {patch_sql} AND {tier_sql}
-                        """
-                        args_ct = (my_role_db, e_cid, *patch_args, *tier_args)
-
-                    for my_cid, g, w in con.execute(q_ct, args_ct).fetchall():
+                    for my_cid, g, w in con.execute(q_syn, syn_args).fetchall():
                         my_cid = int(my_cid)
                         if my_cid not in base_map:
                             continue
@@ -386,32 +361,93 @@ def recommend_champions(
                         if g <= 0:
                             continue
                         wr = 100.0 * (w / g)
-                        counter_delta[my_cid] += (wr - base_map[my_cid]["base_wr"])
-                        counter_samples[my_cid] += g
+                        delta = wr - float(base_map[my_cid]["base_wr"])
+                        synergy_sum_wdelta[my_cid] += delta * g
+                        synergy_sum_games[my_cid] += g
 
-        # ---- assemble
+        # -------------------------
+        # counter: 가중 평균 + SUM+GROUP BY로 통합
+        # -------------------------
+        counter_sum_wdelta: Dict[int, float] = defaultdict(float)
+        counter_sum_games: Dict[int, int] = defaultdict(int)
+
+        if _table_exists(con, "agg_matchup_role"):
+            # 스키마 확정: patch,tier,my_role,enemy_role,my_champ_id,enemy_champ_id,games,wins
+            dist = champ_role_distribution(con, patch, tier)
+            guessed = guess_enemy_roles([int(x) for x in (enemy_picks or [])], dist)
+
+            for e_cid in (enemy_picks or []):
+                e_cid = int(e_cid)
+                if e_cid == 0:
+                    continue
+                e_role = guessed.get(e_cid, "UNKNOWN")
+
+                if e_role != "UNKNOWN":
+                    q_ct = f"""
+                      SELECT my_champ_id, COALESCE(SUM(games),0) AS g, COALESCE(SUM(wins),0) AS w
+                      FROM agg_matchup_role
+                      WHERE my_role=? AND enemy_role=? AND enemy_champ_id=?
+                        AND {patch_sql} AND {tier_sql}
+                      GROUP BY my_champ_id
+                    """
+                    args_ct = (my_role_db, e_role, e_cid, *patch_args, *tier_args)
+                else:
+                    # enemy_role 추정 실패하면 enemy_role 조건을 빼고 집계
+                    q_ct = f"""
+                      SELECT my_champ_id, COALESCE(SUM(games),0) AS g, COALESCE(SUM(wins),0) AS w
+                      FROM agg_matchup_role
+                      WHERE my_role=? AND enemy_champ_id=?
+                        AND {patch_sql} AND {tier_sql}
+                      GROUP BY my_champ_id
+                    """
+                    args_ct = (my_role_db, e_cid, *patch_args, *tier_args)
+
+                for my_cid, g, w in con.execute(q_ct, args_ct).fetchall():
+                    my_cid = int(my_cid)
+                    if my_cid not in base_map:
+                        continue
+                    g = int(g or 0)
+                    w = int(w or 0)
+                    if g <= 0:
+                        continue
+                    wr = 100.0 * (w / g)
+                    delta = wr - float(base_map[my_cid]["base_wr"])
+                    counter_sum_wdelta[my_cid] += delta * g
+                    counter_sum_games[my_cid] += g
+
+        # -------------------------
+        # assemble
+        # - synergy_delta/counter_delta는 "가중 평균 델타"로 안정화
+        # - samples는 누적 games
+        # -------------------------
         recs: List[Dict[str, Any]] = []
         for cid, b in base_map.items():
-            syn = float(synergy_delta.get(cid, 0.0))
-            ctd = float(counter_delta.get(cid, 0.0))
+            cid = int(cid)
+
+            syn_g = int(synergy_sum_games.get(cid, 0))
+            ct_g = int(counter_sum_games.get(cid, 0))
+
+            syn = float(synergy_sum_wdelta[cid] / syn_g) if syn_g > 0 else 0.0
+            ctd = float(counter_sum_wdelta[cid] / ct_g) if ct_g > 0 else 0.0
+
             final = float(b["base_lb"] + syn + ctd)
 
             recs.append(
                 {
-                    "champ_id": int(cid),
+                    "champ_id": cid,
                     "final_score": round(final, 2),
                     "base_wr": round(float(b["base_wr"]), 2),
                     "base_lb": round(float(b["base_lb"]), 2),
                     "games": int(b["games"]),
                     "counter_delta": round(ctd, 2),
-                    "counter_samples": int(counter_samples.get(cid, 0)),
+                    "counter_samples": ct_g,
                     "synergy_delta": round(syn, 2),
-                    "synergy_samples": int(synergy_samples.get(cid, 0)),
+                    "synergy_samples": syn_g,
                 }
             )
 
         recs.sort(key=lambda x: (x["final_score"], x["games"]), reverse=True)
-        return recs[: int(top_n)], "ok"
+        return recs[: int(top_n)]
     finally:
         try:
             con.close()

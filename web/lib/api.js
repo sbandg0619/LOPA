@@ -1,13 +1,10 @@
 // web/lib/api.js
-const FALLBACK_LOCAL = "http://127.0.0.1:8000";
 
-function getApiBase() {
-  // Vercel에서 환경변수로 주입: NEXT_PUBLIC_API_BASE
-  // 로컬 개발: 없으면 127.0.0.1:8000 사용
-  const env = typeof process !== "undefined" ? process.env?.NEXT_PUBLIC_API_BASE : "";
-  const base = (env || "").trim() || FALLBACK_LOCAL;
-  return base.replace(/\/$/, "");
-}
+const DEFAULT_API =
+  (typeof process !== "undefined" &&
+    process.env &&
+    (process.env.NEXT_PUBLIC_LOPA_API_BASE || process.env.NEXT_PUBLIC_API_BASE)) ||
+  "http://127.0.0.1:8000";
 
 async function fetchText(url, opts = {}) {
   const r = await fetch(url, opts);
@@ -21,24 +18,21 @@ async function fetchText(url, opts = {}) {
   }
 
   if (!r.ok) {
-    // detail이 객체일 때도 사용자에게 문자열로 보이게 처리
-    const detail = j?.detail;
+    // FastAPI는 보통 {"detail": "..."} 형태
     const msg =
-      typeof detail === "string"
-        ? detail
-        : detail
-        ? JSON.stringify(detail)
-        : j?._raw
-        ? String(j._raw)
+      j && typeof j === "object"
+        ? (j.detail ? String(j.detail) : j.msg ? String(j.msg) : `HTTP ${r.status}`)
         : `HTTP ${r.status}`;
+
+    // ❗️예전처럼 [object Object] 뜨는 걸 방지: 최대한 문자열로 만든다
     throw new Error(msg);
   }
 
   return j;
 }
 
-export async function apiRecommend(body) {
-  const base = getApiBase();
+export async function apiRecommend(body, apiBase = DEFAULT_API) {
+  const base = String(apiBase || DEFAULT_API).replace(/\/$/, "");
   return await fetchText(`${base}/recommend`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -46,8 +40,9 @@ export async function apiRecommend(body) {
   });
 }
 
-export async function apiMeta(dbPath) {
-  const base = getApiBase();
+// /meta (patch list, latest_patch)
+export async function apiMeta(dbPath, apiBase = DEFAULT_API) {
+  const base = String(apiBase || DEFAULT_API).replace(/\/$/, "");
   const qs = new URLSearchParams();
   if (dbPath) qs.set("db_path", String(dbPath));
   return await fetchText(`${base}/meta?${qs.toString()}`, { method: "GET" });
