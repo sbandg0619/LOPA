@@ -97,6 +97,24 @@ def _tier_condition(tier: str) -> Tuple[str, Tuple[Any, ...]]:
     return "(?='ALL' OR tier=? OR tier IS NULL)", (tier, tier)
 
 
+def _clamp(x: float, lo: float, hi: float) -> float:
+    return lo if x < lo else hi if x > hi else x
+
+
+def _safe_int(x: Any, default: int = 0) -> int:
+    try:
+        return int(x)
+    except Exception:
+        return default
+
+
+def _safe_float(x: Any, default: float = 0.0) -> float:
+    try:
+        return float(x)
+    except Exception:
+        return default
+
+
 # -------------------------
 # patch helpers
 # -------------------------
@@ -132,7 +150,6 @@ def champ_role_distribution(con: sqlite3.Connection, patch: str, tier: str) -> D
     patch_sql, patch_args = _patch_condition(patch)
     tier_sql, tier_args = _tier_condition(tier)
 
-    # ✅ 이미 SUM/GROUP BY라서 ALL에서도 안전
     q = f"""
       SELECT champ_id, role, SUM(games)
       FROM agg_champ_role
@@ -160,10 +177,6 @@ def guess_enemy_roles(enemy_ids: List[int], dist: Dict[int, Dict[str, int]]) -> 
     return out
 
 
-def _clamp(x: float, lo: float, hi: float) -> float:
-    return lo if x < lo else hi if x > hi else x
-
-
 # -------------------------
 # core recommender
 # -------------------------
@@ -176,7 +189,7 @@ def recommend_champions(
     bans: List[int],
     ally_picks_by_role: Dict[str, List[int]],
     enemy_picks: List[int],
-    min_games: int = 30,              # (호환용) 남겨둠
+    min_games: int = 30,              # ✅ 실제 필터로 사용(>=1 권장)
     min_pick_rate: float = 0.005,     # 기본 0.5%
     use_champ_pool: bool = True,      # True면 champ_pool 후보만 / False면 전체 후보
     max_candidates: int = 400,        # 전체 후보일 때 후보 상한
@@ -192,10 +205,26 @@ def recommend_champions(
             return [], {"reason": "missing table agg_champ_role"}
 
         my_role_db = _normalize_role_with_db(con, my_role)
-        banset = set(int(x) for x in (bans or []))
+        banset = set(int(x) for x in (bans or []) if int(x) != 0)
 
         patch_sql, patch_args = _patch_condition(patch)
         tier_sql, tier_args = _tier_condition(tier)
+
+        # ✅ (핵심) total_games_for_role 계산: pick_rate 계산/표시용
+        q_total = f"""
+          SELECT SUM(games)
+          FROM agg_champ_role
+          WHERE role=?
+            AND {patch_sql}
+            AND {tier_sql}
+        """
+        total_row = con.execute(q_total, (my_role_db, *patch_args, *tier_args)).fetchone()
+        total_games_for_role = int((total_row[0] if total_row else 0) or 0)
+
+        # min_games 안전 보정
+        min_games_eff = int(min_games or 0)
+        if min_games_eff < 1:
+            min_games_eff = 1
 
         # -------------------------
         # 1) candidate set 만들기
@@ -211,16 +240,7 @@ def recommend_champions(
         else:
             # 전체 후보: pick_rate >= min_pick_rate
             # pick_rate = champ_games / total_games_for_role
-            q_total = f"""
-              SELECT SUM(games)
-              FROM agg_champ_role
-              WHERE role=?
-                AND {patch_sql}
-                AND {tier_sql}
-            """
-            total_row = con.execute(q_total, (my_role_db, *patch_args, *tier_args)).fetchone()
-            total_games = int((total_row[0] if total_row else 0) or 0)
-            if total_games <= 0:
+            if total_games_for_role <= 0:
                 return [], {"reason": "total_games_for_role is 0 (no data for role/patch/tier)"}
 
             q_cand = f"""
@@ -243,7 +263,7 @@ def recommend_champions(
                 if cid in banset:
                     continue
                 g = int(g or 0)
-                pr = (g / total_games) if total_games > 0 else 0.0
+                pr = (g / total_games_for_role) if total_games_for_role > 0 else 0.0
                 if pr >= float(min_pick_rate):
                     candidates.append(cid)
 
@@ -265,7 +285,9 @@ def recommend_champions(
         rows = con.execute(q_base, (my_role_db, *patch_args, *tier_args, *candidates)).fetchall()
 
         # role 데이터가 너무 없으면 role 없이 한번 더(안전장치)
+        used_fallback_roleless = False
         if not rows:
+            used_fallback_roleless = True
             q_base2 = f"""
               SELECT champ_id, SUM(games) AS games, SUM(wins) AS wins
               FROM agg_champ_role
@@ -286,15 +308,32 @@ def recommend_champions(
             w = int((row[2] if len(row) > 2 else 0) or 0)
             if g <= 0:
                 continue
+
+            # ✅ min_games 실제 적용
+            if g < min_games_eff:
+                continue
+
             wr = 100.0 * (w / g)
             lb = 100.0 * _wilson_lower_bound(w, g)
-            base_map[cid] = {"games": g, "wins": w, "base_wr": wr, "base_lb": lb}
+
+            # ✅ pick_rate 계산 (0..1)
+            pr = None
+            if total_games_for_role > 0:
+                pr = g / total_games_for_role
+
+            base_map[cid] = {
+                "games": g,
+                "wins": w,
+                "base_wr": wr,
+                "base_lb": lb,
+                "pick_rate": pr,  # 0..1 or None
+            }
 
         if not base_map:
-            return [], {"reason": "base_map empty"}
+            return [], {"reason": f"base_map empty (maybe min_games too high: min_games={min_games_eff})"}
 
         # -------------------------
-        # 3) synergy: ✅ SUM/GROUP BY로 "패치/티어 행 여러개" 누적 폭발 방지
+        # 3) synergy: ✅ SUM/GROUP BY로 누적 폭발 방지
         # -------------------------
         synergy_delta: Dict[int, float] = defaultdict(float)
         synergy_samples: Dict[int, int] = defaultdict(int)
@@ -332,7 +371,6 @@ def recommend_champions(
                                 continue
                             wr = 100.0 * (w / g)
                             delta = wr - base_map[my_cid]["base_wr"]
-                            # 폭발 방지 2차 안전장치(개별 조합 델타를 너무 크게 못 가게)
                             delta = _clamp(delta, -20.0, 20.0)
 
                             synergy_delta[my_cid] += delta
@@ -399,11 +437,18 @@ def recommend_champions(
             syn = float(synergy_delta.get(cid, 0.0))
             ctd = float(counter_delta.get(cid, 0.0))
 
-            # 총합도 안전장치(너무 과하게 못 가게)
             syn = _clamp(syn, -30.0, 30.0)
             ctd = _clamp(ctd, -30.0, 30.0)
 
             final = float(b["base_lb"] + syn + ctd)
+
+            pr = b.get("pick_rate", None)
+            pr_pct = None
+            if pr is not None:
+                try:
+                    pr_pct = 100.0 * float(pr)
+                except Exception:
+                    pr_pct = None
 
             recs.append(
                 {
@@ -412,6 +457,9 @@ def recommend_champions(
                     "base_wr": round(float(b["base_wr"]), 2),
                     "base_lb": round(float(b["base_lb"]), 2),
                     "games": int(b["games"]),
+                    # ✅ 픽률 추가(프론트에서 (n/a) 해결)
+                    "pick_rate": (None if pr is None else round(float(pr), 6)),      # 0..1
+                    "pick_rate_pct": (None if pr_pct is None else round(float(pr_pct), 3)),  # 0..100
                     "counter_delta": round(ctd, 2),
                     "counter_samples": int(counter_samples.get(cid, 0)),
                     "synergy_delta": round(syn, 2),
@@ -420,7 +468,22 @@ def recommend_champions(
             )
 
         recs.sort(key=lambda x: (x["final_score"], x["games"]), reverse=True)
-        return recs[: int(top_n)], {"reason": "ok"}
+
+        meta = {
+            "reason": "ok",
+            "role_used": my_role_db,
+            "patch": patch,
+            "tier": tier,
+            "use_champ_pool": bool(use_champ_pool),
+            "min_games": int(min_games_eff),
+            "min_pick_rate": float(min_pick_rate),
+            "total_games_for_role": int(total_games_for_role),
+            "candidates_requested": int(len(candidates)),
+            "base_rows_after_min_games": int(len(base_map)),
+            "used_fallback_roleless": bool(used_fallback_roleless),
+        }
+
+        return recs[: int(top_n)], meta
     finally:
         try:
             con.close()
