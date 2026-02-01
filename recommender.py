@@ -200,7 +200,8 @@ def _best_role_for_champ(cid: int, dist: Dict[int, Dict[str, int]], roles: List[
     데이터가 없으면 UNKNOWN.
     """
     m = dist.get(int(cid)) or {}
-    if _champ_total_games(m) <= 0:
+    total = _champ_total_games(m)
+    if total <= 0:
         return "UNKNOWN"
 
     best_role = "UNKNOWN"
@@ -209,7 +210,6 @@ def _best_role_for_champ(cid: int, dist: Dict[int, Dict[str, int]], roles: List[
     for r in roles:
         rr = _role_ratio(m, r)
         g_r = int(m.get(r, 0) or 0)
-        total = _champ_total_games(m)
         # tie-break: ratio -> role games -> total games -> role order -> champ id
         key = (rr, g_r, total, -roles.index(r), -int(cid))
         if best_key is None or key > best_key:
@@ -219,50 +219,24 @@ def _best_role_for_champ(cid: int, dist: Dict[int, Dict[str, int]], roles: List[
     return best_role
 
 
-def build_enemy_role_guess_detail(ids: List[int], dist: Dict[int, Dict[str, int]], assigned: Dict[int, str]) -> Dict[int, Dict[str, Any]]:
-    """
-    프론트 Enemy Role Guess 카드에서 confidence/top/total 표시용 detail 생성
-    """
-    out: Dict[int, Dict[str, Any]] = {}
-    for cid in ids:
-        m = dist.get(int(cid)) or {}
-        total = _champ_total_games(m)
-
-        role = assigned.get(cid, "UNKNOWN")
-        top_games = int(m.get(role, 0) or 0) if (role and role != "UNKNOWN") else 0
-        top_share = (float(top_games) / float(total)) if total > 0 else 0.0
-
-        out[int(cid)] = {
-            "role": role,
-            "top_role": role,
-            "top_games": int(top_games),
-            "total_games": int(total),
-            "top_share": float(top_share),
-            # 디버그/확장용(프론트는 안 써도 됨)
-            "role_games": {k: int(v or 0) for k, v in m.items()},
-        }
-    return out
-
-
 def guess_enemy_roles_iterative(enemy_ids: List[int], dist: Dict[int, Dict[str, int]]) -> Dict[int, str]:
     """
-    ✅ 사용자 로직 반영(중복 역할 방지):
+    ✅ 사용자 로직 반영(중요):
 
     - role별로 1등 챔프 임시 저장
     - 중복(한 챔프가 여러 role 1등)이면, 그 챔프는 "자기가 1등한 role 중 비율이 가장 큰 role"을 차지
     - 배정된 champ/role 제거 후 남은 대상으로 반복
-    - (챔프 수 < 라인 수여도) 동일한 방식으로 반복해서 "각 챔프가 1개 role"을 받을 때까지 진행
-      -> 남는 role이 생기는 건 OK, 하지만 배정된 role 중복은 발생하지 않음
+    - ✅ 챔프 수 < 라인 수여도 이 반복 로직을 그대로 수행하고,
+      "챔피언마다 라인이 하나씩 정해진 순간" 종료한다. (남는 라인은 그냥 남김)
     - 데이터 없으면 UNKNOWN
     """
     ids = [int(x) for x in (enemy_ids or []) if int(x) != 0]
     ids = [x for i, x in enumerate(ids) if x not in ids[:i]]  # unique
-
     if not ids:
         return {}
 
     remaining_champs = ids[:]
-    remaining_roles = ROLES[:]
+    remaining_roles = ROLES[:]  # 남는 라인이 생겨도 OK
     assigned: Dict[int, str] = {}
 
     guard = 0
@@ -315,6 +289,7 @@ def guess_enemy_roles_iterative(enemy_ids: List[int], dist: Dict[int, Dict[str, 
                 for r in roles_won:
                     rr = _role_ratio(m, r)
                     g_r = int(m.get(r, 0) or 0)
+                    # ratio -> role games -> total games -> role order -> champ id
                     key = (rr, g_r, total, -remaining_roles.index(r), -cid)
                     if chosen_key is None or key > chosen_key:
                         chosen_key = key
@@ -324,7 +299,7 @@ def guess_enemy_roles_iterative(enemy_ids: List[int], dist: Dict[int, Dict[str, 
             newly_assigned.append((cid, chosen_role))
 
         if not newly_assigned:
-            # 막히면 강제 배정
+            # 막히면 강제 배정: 남은 역할 중 best를 하나 찝어 배정하고 진행
             cid = min(remaining_champs)
             role = _best_role_for_champ(cid, dist, remaining_roles)
             assigned[cid] = role
@@ -341,25 +316,10 @@ def guess_enemy_roles_iterative(enemy_ids: List[int], dist: Dict[int, Dict[str, 
         assigned_champs_set = set(cid for cid, _ in newly_assigned)
         remaining_champs = [c for c in remaining_champs if c not in assigned_champs_set]
 
-        # ✅ 중요한 포인트: role도 제거해서 "배정된 role 중복"을 막는다
         assigned_roles_set = set(r for _, r in newly_assigned if r in remaining_roles)
         remaining_roles = [r for r in remaining_roles if r not in assigned_roles_set]
 
-        # ✅ 챔프가 다 배정되면 종료 (남는 role은 있어도 OK)
-        if not remaining_champs:
-            break
-
-    # remaining_champs가 남으면: 남은 role들 중 best role로 배정(그래도 role 제거해서 중복 방지)
-    while remaining_champs and remaining_roles and guard < 80:
-        guard += 1
-        cid = min(remaining_champs)
-        role = _best_role_for_champ(cid, dist, remaining_roles)
-        assigned[cid] = role
-        remaining_champs.remove(cid)
-        if role in remaining_roles:
-            remaining_roles.remove(role)
-
-    # 그래도 남으면(이론상 거의 없음): 전체 ROLES 기준 best role(여기서는 중복 가능할 수 있지만 안전망)
+    # remaining_roles가 먼저 바닥나서 챔프가 남으면: 각자 best role(중복 허용)
     if remaining_champs:
         for cid in remaining_champs:
             if cid in assigned:
@@ -370,6 +330,28 @@ def guess_enemy_roles_iterative(enemy_ids: List[int], dist: Dict[int, Dict[str, 
     for cid in ids:
         out2[cid] = assigned.get(cid, _best_role_for_champ(cid, dist, ROLES))
     return out2
+
+
+def build_enemy_role_guess_detail(enemy_role_guess: Dict[int, str], dist: Dict[int, Dict[str, int]]) -> Dict[str, Dict[str, Any]]:
+    """
+    UI 표시용:
+      meta.enemy_role_guess_detail[cid] = {
+        top_share, top_games, total_games
+      }
+    여기서 top_*는 "추정된 role"에 대한 샘플/비율로 사용.
+    """
+    out: Dict[str, Dict[str, Any]] = {}
+    for cid, role in (enemy_role_guess or {}).items():
+        m = dist.get(int(cid)) or {}
+        total = _champ_total_games(m)
+        g = int(m.get(role, 0) or 0) if role and role != "UNKNOWN" else 0
+        share = (float(g) / float(total)) if total > 0 else 0.0
+        out[str(int(cid))] = {
+            "top_share": share,
+            "top_games": g,
+            "total_games": total,
+        }
+    return out
 
 
 # -------------------------
@@ -421,16 +403,14 @@ def recommend_champions(
         if min_games_eff < 1:
             min_games_eff = 1
 
-        # ✅ enemy role guess는 "표시 + counter 반영"용
+        # ✅ enemy role guess는 "표시/카운터용"으로 항상 meta에 실어줌
         enemy_role_guess: Dict[int, str] = {}
-        enemy_role_guess_detail: Dict[int, Dict[str, Any]] = {}
+        enemy_role_guess_detail: Dict[str, Dict[str, Any]] = {}
+        dist_for_guess: Dict[int, Dict[str, int]] = {}
         if enemy_picks:
             dist_for_guess = champ_role_distribution(con, patch, tier)
             enemy_role_guess = guess_enemy_roles_iterative([int(x) for x in (enemy_picks or [])], dist_for_guess)
-            # detail도 생성(프론트에서 confidence/top/total 표시)
-            ids_unique = [int(x) for x in enemy_picks if int(x) != 0]
-            ids_unique = [x for i, x in enumerate(ids_unique) if x not in ids_unique[:i]]
-            enemy_role_guess_detail = build_enemy_role_guess_detail(ids_unique, dist_for_guess, enemy_role_guess)
+            enemy_role_guess_detail = build_enemy_role_guess_detail(enemy_role_guess, dist_for_guess)
 
         # -------------------------
         # 1) candidate set 만들기
@@ -446,7 +426,6 @@ def recommend_champions(
                     "enemy_role_guess": enemy_role_guess,
                     "enemy_role_guess_detail": enemy_role_guess_detail,
                     "enemy_role_guess_method": "iterative_v1",
-                    "used_enemy_role_column": False,
                 }
             candidates = pool
         else:
@@ -456,7 +435,6 @@ def recommend_champions(
                     "enemy_role_guess": enemy_role_guess,
                     "enemy_role_guess_detail": enemy_role_guess_detail,
                     "enemy_role_guess_method": "iterative_v1",
-                    "used_enemy_role_column": False,
                 }
 
             q_cand = f"""
@@ -489,7 +467,6 @@ def recommend_champions(
                     "enemy_role_guess": enemy_role_guess,
                     "enemy_role_guess_detail": enemy_role_guess_detail,
                     "enemy_role_guess_method": "iterative_v1",
-                    "used_enemy_role_column": False,
                 }
 
         # -------------------------
@@ -525,7 +502,6 @@ def recommend_champions(
                 "enemy_role_guess": enemy_role_guess,
                 "enemy_role_guess_detail": enemy_role_guess_detail,
                 "enemy_role_guess_method": "iterative_v1",
-                "used_enemy_role_column": False,
             }
 
         base_map: Dict[int, Dict[str, Any]] = {}
@@ -560,7 +536,6 @@ def recommend_champions(
                 "enemy_role_guess": enemy_role_guess,
                 "enemy_role_guess_detail": enemy_role_guess_detail,
                 "enemy_role_guess_method": "iterative_v1",
-                "used_enemy_role_column": False,
             }
 
         # -------------------------
@@ -622,13 +597,15 @@ def recommend_champions(
             my_c_col = "my_champ_id" if "my_champ_id" in mc else ("champ_id" if "champ_id" in mc else None)
             e_c_col = "enemy_champ_id" if "enemy_champ_id" in mc else ("other_champ_id" if "other_champ_id" in mc else None)
 
+            if enemy_role_col:
+                used_enemy_role_column = True
+
             if my_role_col and my_c_col and e_c_col:
                 for e_cid in (enemy_picks or []):
                     e_cid = int(e_cid)
                     e_role = enemy_role_guess.get(e_cid, "UNKNOWN")
 
                     if enemy_role_col and e_role != "UNKNOWN":
-                        used_enemy_role_column = True
                         q_ct = f"""
                           SELECT {my_c_col} AS my_cid, SUM(games) AS games, SUM(wins) AS wins
                           FROM agg_matchup_role
@@ -711,7 +688,8 @@ def recommend_champions(
             "candidates_requested": int(len(candidates)),
             "base_rows_after_min_games": int(len(base_map)),
             "used_fallback_roleless": bool(used_fallback_roleless),
-            # ✅ NEW: UI 표시 + 디버그용
+
+            # ✅ UI 표시용 + 카운터용
             "enemy_role_guess": enemy_role_guess,
             "enemy_role_guess_detail": enemy_role_guess_detail,
             "enemy_role_guess_method": "iterative_v1",
