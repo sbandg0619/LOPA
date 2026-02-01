@@ -203,7 +203,13 @@ export default function RecommendPage() {
   const [autoPull, setAutoPull] = useState(true);
 
   // recommend inputs
-  const [dbPath, setDbPath] = useState("lol_graph_personal.db");
+  const DEFAULT_DB_PATH =
+    typeof window !== "undefined" && (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1")
+      ? "lol_graph_personal.db"
+      : "lol_graph_public.db";
+
+  const [dbPath, setDbPath] = useState(DEFAULT_DB_PATH);
+
   const [patch, setPatch] = useState("ALL");
   const [tier, setTier] = useState("ALL");
   const [myRole, setMyRole] = useState("MIDDLE");
@@ -625,6 +631,7 @@ export default function RecommendPage() {
       patch,
       tier,
       my_role: myRole,
+      use_champ_pool: candidateMode === "POOL",
       champ_pool: candidateMode === "POOL" ? champPoolIds : [], // ✅ ALL 모드면 비워서 보냄
       bans: bansIds,
       enemy_picks: enemyIds,
@@ -783,7 +790,7 @@ export default function RecommendPage() {
             className="btn"
             onClick={() => {
               clearRecommendPrefs();
-              setDbPath("lol_graph_personal.db");
+              setDbPath(DEFAULT_DB_PATH);
               setPatch("ALL");
               setTier("ALL");
               setMyRole("MIDDLE");
