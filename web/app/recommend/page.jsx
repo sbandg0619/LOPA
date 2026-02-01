@@ -375,13 +375,204 @@ function formatPct01(x) {
   return `${(n * 100).toFixed(1)}%`;
 }
 
+/**
+ * ✅ 핵심: 네가 설명한 "전역(unique) 라인 배정 반복 로직" (프론트 구현)
+ *
+ * 입력:
+ *  - enemyIds: number[]
+ *  - roleSharesByChamp: { [cid: number]: { TOP: number, JUNGLE: number, ... } }
+ *
+ * 출력:
+ *  - assigned: { [cidStr: string]: "TOP"|"JUNGLE"|...|"UNKNOWN" }
+ *  - assignedDetail: { [cidStr: string]: { chosen_share?: number } }
+ */
+function assignUniqueRolesByShares(enemyIds, roleSharesByChamp) {
+  const ids = (enemyIds || []).map((x) => parseInt(x, 10)).filter((n) => Number.isFinite(n) && n !== 0);
+  const uniq = [];
+  for (const cid of ids) if (!uniq.includes(cid)) uniq.push(cid);
+
+  const remainingChamps = [...uniq];
+  let remainingRoles = [...ROLES];
+
+  const assigned = {}; // cid -> role
+  const assignedDetail = {}; // cid -> {chosen_share}
+
+  function share(cid, role) {
+    const per = roleSharesByChamp?.[cid] || {};
+    const v = Number(per?.[role]);
+    return Number.isFinite(v) ? v : 0;
+  }
+
+  // 안전장치: 무한루프 방지
+  let guard = 0;
+
+  while (remainingChamps.length && guard < 50) {
+    guard += 1;
+
+    // 1) 각 라인별로 그 라인 share 최대 챔프를 임시 선정
+    const proposals = []; // {role, cid, s}
+    for (const r of remainingRoles) {
+      let bestCid = null;
+      let bestS = -1;
+      for (const cid of remainingChamps) {
+        const s = share(cid, r);
+        if (s > bestS) {
+          bestS = s;
+          bestCid = cid;
+        }
+      }
+      if (bestCid !== null && bestS > 0) {
+        proposals.push({ role: r, cid: bestCid, s: bestS });
+      }
+    }
+
+    // 2) 아무 라인도 제안 못하면(전부 0) -> 각 챔프 argmax로 마무리(남은 role 기준)
+    if (!proposals.length) {
+      for (const cid of remainingChamps) {
+        let bestR = null;
+        let bestS = -1;
+        for (const r of remainingRoles) {
+          const s = share(cid, r);
+          if (s > bestS) {
+            bestS = s;
+            bestR = r;
+          }
+        }
+        if (!bestR || bestS <= 0) {
+          assigned[cid] = "UNKNOWN";
+          assignedDetail[cid] = { chosen_share: 0 };
+        } else {
+          assigned[cid] = bestR;
+          assignedDetail[cid] = { chosen_share: bestS };
+        }
+      }
+      break;
+    }
+
+    // 3) 한 챔프가 여러 role에 뽑히면, 그 중 share 가장 큰 role만 확정
+    const byChamp = {}; // cid -> proposals[]
+    for (const p of proposals) {
+      if (!byChamp[p.cid]) byChamp[p.cid] = [];
+      byChamp[p.cid].push(p);
+    }
+
+    const newlyAssigned = {}; // cid -> role
+    const usedRoles = new Set();
+
+    for (const [cidStr, arr] of Object.entries(byChamp)) {
+      const cid = parseInt(cidStr, 10);
+      const sorted = arr
+        .slice()
+        .sort((a, b) => {
+          if (b.s !== a.s) return b.s - a.s; // share desc
+          return ROLES.indexOf(a.role) - ROLES.indexOf(b.role); // role order
+        });
+      const chosen = sorted[0];
+      newlyAssigned[cid] = chosen.role;
+      usedRoles.add(chosen.role);
+      assignedDetail[cid] = { chosen_share: chosen.s };
+    }
+
+    // 4) 확정된 챔프/라인 제거
+    for (const [cidStr, r] of Object.entries(newlyAssigned)) {
+      const cid = parseInt(cidStr, 10);
+      assigned[cid] = r;
+    }
+
+    // 남은 챔프
+    const newlySet = new Set(Object.keys(newlyAssigned).map((x) => parseInt(x, 10)));
+    for (let i = remainingChamps.length - 1; i >= 0; i--) {
+      if (newlySet.has(remainingChamps[i])) remainingChamps.splice(i, 1);
+    }
+
+    // 남은 라인
+    remainingRoles = remainingRoles.filter((r) => !usedRoles.has(r));
+
+    // 챔프 수 < 라인 수여도: 챔프 다 배정되면 종료(라인 남는 건 OK)
+    if (!remainingChamps.length) break;
+
+    // 라인이 다 사라졌는데 챔프가 남아있으면: 전체 ROLES argmax로 마무리
+    if (!remainingRoles.length) {
+      for (const cid of remainingChamps) {
+        let bestR = null;
+        let bestS = -1;
+        const per = roleSharesByChamp?.[cid] || {};
+        for (const r of ROLES) {
+          const s = Number(per?.[r]);
+          const ss = Number.isFinite(s) ? s : 0;
+          if (ss > bestS) {
+            bestS = ss;
+            bestR = r;
+          }
+        }
+        if (!bestR || bestS <= 0) {
+          assigned[cid] = "UNKNOWN";
+          assignedDetail[cid] = { chosen_share: 0 };
+        } else {
+          assigned[cid] = bestR;
+          assignedDetail[cid] = { chosen_share: bestS };
+        }
+      }
+      break;
+    }
+  }
+
+  // 결과를 string key로 반환(기존 meta 포맷과 맞추기)
+  const out = {};
+  const outDetail = {};
+  for (const cid of uniq) {
+    out[String(cid)] = assigned[cid] || "UNKNOWN";
+    outDetail[String(cid)] = assignedDetail[cid] || {};
+  }
+  return { assigned: out, assignedDetail: outDetail };
+}
+
+/**
+ * ✅ meta에서 role share(각 라인 비율)를 최대한 관대하게 꺼내오기
+ *  - 백엔드가 어떤 키로 내려주든 최대한 흡수
+ */
+function extractRoleSharesFromDetail(detailObj) {
+  // 가능한 후보 키들(너 백엔드 구현에 맞게 하나가 걸릴 거야)
+  const candidates = [
+    detailObj?.role_shares,
+    detailObj?.roleShares,
+    detailObj?.shares,
+    detailObj?.share_by_role,
+    detailObj?.shareByRole,
+    detailObj?.role_share_map,
+    detailObj?.roleShareMap,
+    detailObj?.role_dist,
+    detailObj?.roleDist,
+  ];
+
+  let raw = null;
+  for (const c of candidates) {
+    if (c && typeof c === "object") {
+      raw = c;
+      break;
+    }
+  }
+  if (!raw) return null;
+
+  const out = {};
+  for (const r of ROLES) {
+    const v = Number(raw?.[r]);
+    out[r] = Number.isFinite(v) ? v : 0;
+  }
+  return out;
+}
+
 function renderEnemyRoleGuessCard({ apiRaw, enemyIds, idToName }) {
   const meta = apiRaw?.meta || {};
-  const guess = meta?.enemy_role_guess || meta?.enemyRoleGuess || null;
+
+  // 기존 서버가 준 guess(단순 argmax 결과일 수도 있음)
+  const guessRaw = meta?.enemy_role_guess || meta?.enemyRoleGuess || null;
+
+  // 서버 detail(여기서 roleShares를 꺼내서 프론트에서 unique 배정)
   const detail = meta?.enemy_role_guess_detail || meta?.enemyRoleGuessDetail || null;
+
   const usedRoleCol = Boolean(meta?.used_enemy_role_column ?? meta?.usedEnemyRoleColumn);
 
-  const hasGuess = guess && typeof guess === "object" && Object.keys(guess).length > 0;
   const ids = Array.isArray(enemyIds) && enemyIds.length ? enemyIds : [];
 
   if (!apiRaw) {
@@ -402,29 +593,65 @@ function renderEnemyRoleGuessCard({ apiRaw, enemyIds, idToName }) {
     );
   }
 
-  if (!hasGuess) {
+  // 1) detail에서 역할별 share를 구성할 수 있는지 확인
+  const roleSharesByChamp = {};
+  let hasAnyShares = false;
+
+  for (const cid of ids) {
+    const d = detail?.[String(cid)] || detail?.[cid] || null;
+    const shares = extractRoleSharesFromDetail(d);
+    if (shares) {
+      roleSharesByChamp[cid] = shares;
+      // 하나라도 0보다 큰 게 있으면 shares 있다고 판단
+      if (Object.values(shares).some((v) => Number(v) > 0)) hasAnyShares = true;
+    }
+  }
+
+  // 2) shares가 있으면: ✅ 프론트에서 네 로직으로 unique 배정
+  //    shares가 없으면: 기존 서버 guessRaw 그대로 표시(어쩔 수 없음)
+  let finalGuess = {};
+  let finalDetailShare = {};
+
+  if (hasAnyShares) {
+    const { assigned, assignedDetail } = assignUniqueRolesByShares(ids, roleSharesByChamp);
+    finalGuess = assigned;
+    finalDetailShare = assignedDetail;
+  } else if (guessRaw && typeof guessRaw === "object") {
+    finalGuess = guessRaw;
+  } else {
+    // 아무것도 없으면 빈 화면 대신 안내
     return (
       <div className="card" style={{ marginTop: 12 }}>
         <div className="h2">Enemy Role Guess</div>
-        <div className="p">
-          (meta에 enemy_role_guess가 없음) — 백엔드 recommender.py에서 meta로 내려주도록 수정이 필요함.
-        </div>
+        <div className="p">(meta에 enemy_role_guess / roleShares가 없음)</div>
       </div>
     );
   }
 
+  // 표 렌더용 rows
   const rows = ids.map((cid) => {
     const k = String(cid);
-    const role = String(guess?.[k] || "UNKNOWN");
-    const d = detail?.[k] || {};
-    const share = d?.top_share ?? d?.topShare;
-    const total = d?.total_games ?? d?.totalGames;
-    const top = d?.top_games ?? d?.topGames;
+    const role = String(finalGuess?.[k] || "UNKNOWN");
+    const d = detail?.[k] || detail?.[cid] || {};
+
+    // 표시용 confidence:
+    // - unique 배정 로직이면 chosen_share를 보여줌
+    // - 아니면 기존 top_share(있으면) 보여줌
+    const chosenShare = Number(finalDetailShare?.[k]?.chosen_share);
+    const shareFromUnique = Number.isFinite(chosenShare) ? chosenShare : null;
+
+    const legacyTopShare = d?.top_share ?? d?.topShare ?? null;
+
+    const share = shareFromUnique !== null ? shareFromUnique : Number(legacyTopShare);
+
+    const total = d?.total_games ?? d?.totalGames ?? null;
+    const top = d?.top_games ?? d?.topGames ?? null;
+
     return {
       cid,
       name: idToName?.[cid] || "UNKNOWN",
       role,
-      share,
+      share: Number.isFinite(Number(share)) ? Number(share) : null,
       total,
       top,
     };
@@ -442,7 +669,8 @@ function renderEnemyRoleGuessCard({ apiRaw, enemyIds, idToName }) {
     <div className="card" style={{ marginTop: 12 }}>
       <div className="h2">Enemy Role Guess</div>
       <div className="p" style={{ marginTop: 0 }}>
-        used enemy_role column: <b>{usedRoleCol ? "YES" : "NO"}</b> — (role이 UNKNOWN이면 role 없는 매치업 쿼리로 fallback)
+        used enemy_role column: <b>{usedRoleCol ? "YES" : "NO"}</b>{" "}
+        — {hasAnyShares ? <b>(프론트 unique 배정 로직 적용됨)</b> : "(서버 guess 그대로 표시)"}
       </div>
 
       <div style={{ display: "grid", gap: 8, marginTop: 10 }}>
@@ -456,10 +684,12 @@ function renderEnemyRoleGuessCard({ apiRaw, enemyIds, idToName }) {
                 {ROLE_KO[r.role] ? `${ROLE_KO[r.role]} (${r.role})` : r.role}
               </div>
             </div>
+
             <div className="p" style={{ marginTop: 6 }}>
-              confidence(share): <b>{formatPct01(r.share)}</b>{" "}
+              confidence(share): <b>{r.share === null ? "(n/a)" : formatPct01(r.share)}</b>{" "}
               <span style={{ opacity: 0.9 }}>
-                — top/total games: {Number.isFinite(Number(r.top)) ? r.top : "(n/a)"} / {Number.isFinite(Number(r.total)) ? r.total : "(n/a)"}
+                — top/total games: {Number.isFinite(Number(r.top)) ? r.top : "(n/a)"} /{" "}
+                {Number.isFinite(Number(r.total)) ? r.total : "(n/a)"}
               </span>
             </div>
           </div>
@@ -1113,7 +1343,7 @@ export default function RecommendPage() {
           {metaErr ? <div style={{ marginTop: 10, fontWeight: 900 }}>❌ meta error: {metaErr}</div> : null}
         </div>
 
-        {/* ✅ NEW: Enemy Role Guess 표시 */}
+        {/* ✅ Enemy Role Guess 표시 (프론트 unique 배정 로직 적용됨) */}
         {renderEnemyRoleGuessCard({ apiRaw, enemyIds, idToName })}
 
         <div className="card" style={{ marginTop: 12 }}>

@@ -210,42 +210,37 @@ def recommend(req: RecommendRequest):
             bans=bans,
             ally_picks_by_role=ally,
             enemy_picks=enemy,
-            min_games=req.min_games,               # 호환용
+            min_games=req.min_games,
             min_pick_rate=req.min_pick_rate,
             use_champ_pool=req.use_champ_pool,
             max_candidates=req.max_candidates,
             top_n=req.top_n,
         )
 
-        # ✅ 핵심: recommender의 meta2를 API 응답 meta로 "합쳐서" 내려줌
-        # - 프론트에서 enemy_role_guess / enemy_role_guess_detail / used_enemy_role_column 등을 표시 가능해짐
-        meta_out: Dict[str, Any] = {
-            "db_path": req.db_path,
-            "patch": patch,
-            "tier": tier,
-            "my_role": my_role,
-            "min_games": req.min_games,
-            "min_pick_rate": req.min_pick_rate,
-            "top_n": req.top_n,
-            "max_candidates": req.max_candidates,
-            "use_champ_pool": req.use_champ_pool,
-        }
-
-        if isinstance(meta2, dict):
-            # meta2의 모든 키를 살려서 내려줌 (원하면 나중에 whitelist로 바꿔도 됨)
-            meta_out.update(meta2)
-
-        # reason은 기존처럼 보장
-        meta_out["reason"] = str(meta_out.get("reason") or meta2.get("reason", "ok") if isinstance(meta2, dict) else "ok")
+        # ✅ NEW: 적 라인 추정 결과를 meta에 포함
+        enemy_role_guess = meta2.get("enemy_role_guess", {}) or {}
+        enemy_role_guess_method = meta2.get("enemy_role_guess_method", "unknown")
 
         return {
             "ok": True,
             "recs": recs,
-            "meta": meta_out,
+            "meta": {
+                "db_path": req.db_path,
+                "patch": patch,
+                "tier": tier,
+                "my_role": my_role,
+                "min_games": req.min_games,
+                "min_pick_rate": req.min_pick_rate,
+                "top_n": req.top_n,
+                "max_candidates": req.max_candidates,
+                "use_champ_pool": req.use_champ_pool,
+                "reason": meta2.get("reason", "ok"),
+                # ✅ UI 표시용
+                "enemy_role_guess": enemy_role_guess,
+                "enemy_role_guess_method": enemy_role_guess_method,
+            },
         }
-
     except FileNotFoundError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        # ✅ 여기로 오면 Render 응답 detail에 파이썬 예외 메시지가 그대로 뜸
         raise HTTPException(status_code=500, detail=str(e))
