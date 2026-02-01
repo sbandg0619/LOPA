@@ -25,6 +25,11 @@ async function fetchText(url, opts = {}) {
   return j;
 }
 
+export async function apiHealth(apiBase = DEFAULT_API) {
+  const base = String(apiBase || DEFAULT_API).replace(/\/$/, "");
+  return await fetchText(`${base}/health`, { method: "GET" });
+}
+
 export async function apiRecommend(body, apiBase = DEFAULT_API) {
   const base = String(apiBase || DEFAULT_API).replace(/\/$/, "");
   return await fetchText(`${base}/recommend`, {

@@ -6,22 +6,12 @@
 // 2) /connect?bridge=...&token=...&next=/recommend 로 들어오면
 //    자동으로 저장 후 next로 이동(=자동이동 복구)
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { bridgeHealth, bridgeState } from "../../lib/bridge";
 import { getBridgeBase, getBridgeToken, setBridgeConfig, clearBridgeConfig } from "../../lib/constants";
 
-function sanitizeNextPath(next) {
-  const s = String(next || "").trim();
-  if (!s) return "/recommend";
-
-  // 내부 경로만 허용 (오픈 리다이렉트 방지)
-  if (!s.startsWith("/")) return "/recommend";
-  if (s.startsWith("//")) return "/recommend";
-  return s;
-}
-
-export default function ConnectPage() {
+function ConnectInner() {
   const router = useRouter();
   const sp = useSearchParams();
 
@@ -33,8 +23,7 @@ export default function ConnectPage() {
   // URL params (있으면 자동 저장+이동)
   const qsBridge = useMemo(() => (sp.get("bridge") || "").trim(), [sp]);
   const qsToken = useMemo(() => (sp.get("token") || "").trim(), [sp]);
-  const qsNextRaw = useMemo(() => (sp.get("next") || "/recommend").trim() || "/recommend", [sp]);
-  const qsNext = useMemo(() => sanitizeNextPath(qsNextRaw), [qsNextRaw]);
+  const qsNext = useMemo(() => (sp.get("next") || "/recommend").trim() || "/recommend", [sp]);
 
   // 1) 최초: localStorage 값 로드
   useEffect(() => {
@@ -55,18 +44,13 @@ export default function ConnectPage() {
   useEffect(() => {
     if (!qsBridge && !qsToken) return;
 
-    // base가 없으면(=qsBridge도 없고 localStorage 로드도 아직이면) 저장/이동을 잠깐 보류
-    const baseToUse = (qsBridge || effectiveBase || "").trim().replace(/\/$/, "");
-    const tokenToUse = (qsToken || effectiveToken || "").trim();
-
-    if (!baseToUse) return; // base 준비될 때까지 기다림
-
-    setBridgeConfig({ bridgeBase: baseToUse, bridgeToken: tokenToUse });
+    // 저장
+    setBridgeConfig({ bridgeBase: qsBridge || effectiveBase, bridgeToken: qsToken || effectiveToken });
 
     // 토큰이 주소창에 남지 않게 query 없는 URL로 바꿔치기 후 이동
     router.replace(qsNext);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [qsBridge, qsToken, qsNext, effectiveBase, effectiveToken]);
+  }, [qsBridge, qsToken, qsNext]);
 
   async function onTestHealth() {
     setMsg("Testing /health ...");
@@ -193,5 +177,13 @@ export default function ConnectPage() {
         </div>
       </div>
     </div>
+  );
+}
+
+export default function ConnectPage() {
+  return (
+    <Suspense fallback={<div className="card"><div className="p">loading...</div></div>}>
+      <ConnectInner />
+    </Suspense>
   );
 }
