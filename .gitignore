@@ -56,3 +56,5 @@ pnpm-debug.log*
 *.temp
 *.bak
 *.swp
+
+!lol_graph_public.db
