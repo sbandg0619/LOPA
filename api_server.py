@@ -217,10 +217,6 @@ def recommend(req: RecommendRequest):
             top_n=req.top_n,
         )
 
-        # ✅ NEW: 적 라인 추정 결과를 meta에 포함
-        enemy_role_guess = meta2.get("enemy_role_guess", {}) or {}
-        enemy_role_guess_method = meta2.get("enemy_role_guess_method", "unknown")
-
         return {
             "ok": True,
             "recs": recs,
@@ -235,9 +231,14 @@ def recommend(req: RecommendRequest):
                 "max_candidates": req.max_candidates,
                 "use_champ_pool": req.use_champ_pool,
                 "reason": meta2.get("reason", "ok"),
-                # ✅ UI 표시용
-                "enemy_role_guess": enemy_role_guess,
-                "enemy_role_guess_method": enemy_role_guess_method,
+
+                # ✅ UI 표시용 (프론트가 기대하는 키들)
+                "enemy_role_guess": meta2.get("enemy_role_guess", {}) or {},
+                "enemy_role_guess_method": meta2.get("enemy_role_guess_method", "unknown"),
+                "enemy_role_guess_detail": meta2.get("enemy_role_guess_detail", {}) or {},
+                "used_enemy_role_column": bool(meta2.get("used_enemy_role_column", False)),
+                "counter_used_role_filtered_cnt": int(meta2.get("counter_used_role_filtered_cnt", 0) or 0),
+                "counter_used_roleless_cnt": int(meta2.get("counter_used_roleless_cnt", 0) or 0),
             },
         }
     except FileNotFoundError as e:
