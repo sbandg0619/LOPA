@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { bridgeHealth, bridgeState } from "../../lib/bridge";
 import { getBridgeBase, getBridgeToken, getBridgeConfig } from "../../lib/constants";
-import { API_BASE, apiMeta, apiRecommend } from "../../lib/api";
+import { apiMeta, apiRecommend } from "../../lib/api";
 import { useChampionCatalog } from "../../lib/champs";
 import { loadRecommendPrefs, saveRecommendPrefs, clearRecommendPrefs } from "../../lib/recommend_prefs";
 
@@ -30,27 +30,6 @@ const TIERS = [
   "GRANDMASTER",
   "CHALLENGER",
 ];
-
-function isLocalHost() {
-  if (typeof window === "undefined") return true;
-  const h = window.location.hostname;
-  return h === "localhost" || h === "127.0.0.1";
-}
-
-function getDefaultDbPath() {
-  return isLocalHost() ? "lol_graph_personal.db" : "lol_graph_public.db";
-}
-
-function normalizeDbPath(p) {
-  const s = String(p || "").trim();
-  if (!s) return getDefaultDbPath();
-
-  // 배포(=localhost 아님)에서는 public로 강제
-  if (!isLocalHost()) return "lol_graph_public.db";
-
-  // 로컬에서는 personal 기본(원하면 입력으로 바꿀 수 있음)
-  return s;
-}
 
 function norm(s) {
   return String(s || "")
@@ -224,14 +203,18 @@ export default function RecommendPage() {
   const [autoPull, setAutoPull] = useState(true);
 
   // recommend inputs
-  const DEFAULT_DB_PATH = getDefaultDbPath();
+  const DEFAULT_DB_PATH =
+    typeof window !== "undefined" && (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1")
+      ? "lol_graph_personal.db"
+      : "lol_graph_public.db";
+
   const [dbPath, setDbPath] = useState(DEFAULT_DB_PATH);
 
   const [patch, setPatch] = useState("ALL");
   const [tier, setTier] = useState("ALL");
   const [myRole, setMyRole] = useState("MIDDLE");
 
-  // 후보 모드: ALL / POOL
+  // 후보 모드: ALL(전체 후보) / POOL(내 챔프폭)
   const [candidateMode, setCandidateMode] = useState("ALL");
 
   // 픽률 필터 (0.5% 기본)
@@ -252,7 +235,7 @@ export default function RecommendPage() {
   const [allyByRole, setAllyByRole] = useState(() => sanitizeAlly({ JUNGLE: [64] }));
   const [allyJsonText, setAllyJsonText] = useState(`{"JUNGLE":[64]}`);
 
-  // ⚠️ 백엔드가 min_games >= 1을 강제하고 있음
+  // ✅ 백엔드가 min_games >= 1 강제라서 UI도 최소 1
   const [minGames, setMinGames] = useState(1);
 
   const [topN, setTopN] = useState(10);
@@ -280,10 +263,11 @@ export default function RecommendPage() {
     return out;
   }, [nameToId]);
 
+  // polling guards
   const healthInFlightRef = useRef(false);
   const stateInFlightRef = useRef(false);
 
-  // ---- prefs: load once ----
+  // prefs: load once
   const prefsLoadedRef = useRef(false);
 
   useEffect(() => {
@@ -291,15 +275,11 @@ export default function RecommendPage() {
     prefsLoadedRef.current = true;
 
     const p = loadRecommendPrefs();
-    if (!p) {
-      // 배포라면 public 강제 보정
-      setDbPath(normalizeDbPath(DEFAULT_DB_PATH));
-      return;
-    }
+    if (!p) return;
 
-    // ✅ prefs 로드하더라도 배포에서는 public로 강제
-    setDbPath(normalizeDbPath(p.dbPath || DEFAULT_DB_PATH));
-
+    // ✅ dbPath는 로컬/배포에 맞게 기본값이 있는데,
+    // 저장된 prefs가 있으면 그걸 우선 적용(사용자가 바꿨을 수 있으니)
+    setDbPath(p.dbPath || DEFAULT_DB_PATH);
     setPatch(p.patch || "ALL");
     setTier(p.tier || "ALL");
     setMyRole(p.myRole || "MIDDLE");
@@ -312,22 +292,24 @@ export default function RecommendPage() {
     setAllyByRole(ally2);
     setAllyJsonText(JSON.stringify(ally2));
 
-    // ⚠️ 백엔드 제약 때문에 최소 1
+    // ✅ 백엔드 스키마 강제 때문에 min_games는 최소 1로 보정
     const mg = Number(p.minGames);
     setMinGames(Number.isFinite(mg) ? Math.max(1, mg) : 1);
 
-    setTopN(Number(p.topN) || 10);
+    const tn = Number(p.topN);
+    setTopN(Number.isFinite(tn) ? Math.max(1, tn) : 10);
 
-    setAutoPull(Boolean(p.autoPull));
+    setAutoPull(typeof p.autoPull === "boolean" ? p.autoPull : true);
     setShowAdvanced(Boolean(p.showAdvanced));
     setShowRawResults(Boolean(p.showRawResults));
     setShowRawState(Boolean(p.showRawState));
 
     if (p.candidateMode) setCandidateMode(String(p.candidateMode));
     if (typeof p.minPickRatePct !== "undefined") setMinPickRatePct(Number(p.minPickRatePct) || 0.5);
-  }, [DEFAULT_DB_PATH]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  // ---- prefs: save debounce ----
+  // prefs: save debounce
   const saveTimerRef = useRef(null);
   useEffect(() => {
     if (!prefsLoadedRef.current) return;
@@ -335,7 +317,7 @@ export default function RecommendPage() {
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     saveTimerRef.current = setTimeout(() => {
       saveRecommendPrefs({
-        dbPath: normalizeDbPath(dbPath),
+        dbPath,
         patch,
         tier,
         myRole,
@@ -346,7 +328,7 @@ export default function RecommendPage() {
         enemyText,
         allyByRole,
         minGames: Math.max(1, Number(minGames) || 1),
-        topN: Number(topN) || 10,
+        topN: Math.max(1, Number(topN) || 10),
         autoPull,
         showAdvanced,
         showRawResults,
@@ -376,7 +358,7 @@ export default function RecommendPage() {
     showRawState,
   ]);
 
-  // ---- bridge config reload ----
+  // bridge config reload
   function reloadBridgeConfig({ showMsg = false } = {}) {
     let base = "";
     let token = "";
@@ -470,7 +452,7 @@ export default function RecommendPage() {
       return j;
     } catch (e) {
       setBridgeOk(false);
-      if (!silent) setBridgeMsg(String(e?.message || e));
+      if (!silent) setBridgeMsg(String(e));
       return null;
     } finally {
       healthInFlightRef.current = false;
@@ -505,9 +487,6 @@ export default function RecommendPage() {
         setAllyJsonText(JSON.stringify(ally2));
 
         setBridgeOk(true);
-      } else if (j && j.ok === false) {
-        // state 실패 메시지도 가끔 보여주고 싶으면 여기에서 bridgeMsg 세팅 가능
-        // setBridgeMsg(j.msg || "state failed");
       }
     } catch {
       // ignore
@@ -568,7 +547,7 @@ export default function RecommendPage() {
     setMetaErr("");
     setMetaLoading(true);
     try {
-      const j = await apiMeta(normalizeDbPath(dbPath));
+      const j = await apiMeta(dbPath);
       const patches = Array.isArray(j?.patches) ? j.patches : [];
       const latest = String(j?.latest_patch || "");
       setAvailablePatches(patches);
@@ -591,6 +570,7 @@ export default function RecommendPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dbPath]);
 
+  // derived arrays for chips
   const champPoolIds = useMemo(() => parseIds(champPoolText), [champPoolText]);
   const bansIds = useMemo(() => parseIds(bansText), [bansText]);
   const enemyIds = useMemo(() => parseIds(enemyText), [enemyText]);
@@ -606,6 +586,7 @@ export default function RecommendPage() {
     setter(idsToText(ids));
   }
 
+  // name add helpers
   const [poolName, setPoolName] = useState("");
   const [nameHints, setNameHints] = useState({ kind: "", cands: [] });
 
@@ -649,11 +630,8 @@ export default function RecommendPage() {
 
     const minPickRate = Math.max(0, Number(minPickRatePct) || 0) / 100.0;
 
-    // ⚠️ 백엔드 제약(min_games >= 1) 때문에 여기서 강제 보정
-    const safeMinGames = Math.max(1, Number(minGames) || 1);
-
     const body = {
-      db_path: normalizeDbPath(dbPath),
+      db_path: dbPath,
       patch,
       tier,
       my_role: myRole,
@@ -662,7 +640,10 @@ export default function RecommendPage() {
       bans: bansIds,
       enemy_picks: enemyIds,
       ally_picks_by_role: allyByRole,
-      min_games: safeMinGames,
+
+      // ✅ 백엔드 스키마 강제(min_games >= 1) 대응
+      min_games: Math.max(1, Number(minGames) || 1),
+
       min_pick_rate: minPickRate,
       top_n: Math.max(1, Number(topN) || 10),
       max_candidates: 400,
@@ -676,8 +657,21 @@ export default function RecommendPage() {
         setApiErr("API 응답에 recs가 없음(형식 이상) — Raw API를 확인하세요.");
       }
     } catch (e) {
-      // api.js가 보장: e.message는 항상 사람이 읽는 문자열
-      const msg = e?.message ? String(e.message) : String(e);
+      // object/array/detail까지 전부 사람이 읽게 문자열화
+      let msg = "";
+      try {
+        if (e && typeof e === "object") {
+          if (typeof e.message === "string" && e.message.trim()) {
+            msg = e.message;
+          } else {
+            msg = JSON.stringify(e, null, 2);
+          }
+        } else {
+          msg = String(e);
+        }
+      } catch {
+        msg = String(e);
+      }
       setApiErr(msg);
     } finally {
       setApiRunning(false);
@@ -697,14 +691,6 @@ export default function RecommendPage() {
         <p className="p">브릿지 상태를 읽고(옵션), API(/recommend)로 추천을 호출합니다.</p>
 
         <div className="card" style={{ marginTop: 12 }}>
-          <div className="h2">API Base</div>
-          <div className="pre">{String(API_BASE)}</div>
-          <div className="p" style={{ marginTop: 6, fontSize: 12, opacity: 0.9 }}>
-            배포(Vercel)에서 localhost로 보이면 env 설정이 안 된 거고, Render URL이 떠야 정상.
-          </div>
-        </div>
-
-        <div className="card" style={{ marginTop: 12 }}>
           <div className="h2">Champion Catalog</div>
           <div className="p">
             상태: <b>{catReady ? "READY" : "LOADING"}</b> — {catStatus}
@@ -716,7 +702,7 @@ export default function RecommendPage() {
 
           <div className="kv">
             <div className="k">db_path</div>
-            <div className="v">{normalizeDbPath(dbPath)}</div>
+            <div className="v">{dbPath}</div>
 
             <div className="k">latest_patch</div>
             <div className="v">{latestPatch || "(unknown)"}</div>
@@ -796,8 +782,7 @@ export default function RecommendPage() {
             </div>
           ) : (
             <div className="p" style={{ marginTop: 8 }}>
-              (결과가 비어있음) — 보통은 <b>패치/티어/픽률</b> 필터가 너무 빡세거나, DB에 해당 role 데이터가 부족한 경우야.
-              Raw API를 켜서 meta를 보면 원인 힌트가 나와.
+              (결과가 비어있음) — 보통은 <b>패치/티어/픽률</b> 필터가 너무 빡세거나, DB에 해당 role 데이터가 부족한 경우야. Raw API를 켜서 meta를 보면 원인 힌트가 나와.
             </div>
           )}
 
@@ -867,11 +852,6 @@ export default function RecommendPage() {
           <div style={{ flex: 1, minWidth: 260 }}>
             <div className="p" style={{ fontWeight: 800 }}>db_path</div>
             <input className="input" value={dbPath} onChange={(e) => setDbPath(e.target.value)} />
-            {!isLocalHost() ? (
-              <div className="p" style={{ marginTop: 6, fontSize: 12, opacity: 0.9 }}>
-                배포(Vercel)에서는 public DB로 강제됩니다: <b>lol_graph_public.db</b>
-              </div>
-            ) : null}
           </div>
 
           <div style={{ width: 170 }}>
@@ -879,7 +859,9 @@ export default function RecommendPage() {
             <select className="input" value={patch} onChange={(e) => setPatch(e.target.value)}>
               <option value="ALL">ALL</option>
               {availablePatches.map((p) => (
-                <option key={`patch_${p}`} value={p}>{p}</option>
+                <option key={`patch_${p}`} value={p}>
+                  {p}
+                </option>
               ))}
             </select>
           </div>
@@ -888,7 +870,9 @@ export default function RecommendPage() {
             <div className="p" style={{ fontWeight: 800 }}>tier</div>
             <select className="input" value={tier} onChange={(e) => setTier(e.target.value)}>
               {TIERS.map((t) => (
-                <option key={`tier_${t}`} value={t}>{t}</option>
+                <option key={`tier_${t}`} value={t}>
+                  {t}
+                </option>
               ))}
             </select>
           </div>
@@ -931,15 +915,7 @@ export default function RecommendPage() {
           <div className="p" style={{ marginTop: 0 }}>
             최소 픽률(%): <b>{Number(minPickRatePct || 0).toFixed(2)}%</b>
           </div>
-          <input
-            className="input"
-            type="number"
-            step="0.1"
-            min="0"
-            max="100"
-            value={minPickRatePct}
-            onChange={(e) => setMinPickRatePct(e.target.value)}
-          />
+          <input className="input" type="number" step="0.1" min="0" max="100" value={minPickRatePct} onChange={(e) => setMinPickRatePct(e.target.value)} />
           <div className="p" style={{ marginTop: 6, fontSize: 12, opacity: 0.9 }}>
             예) 0.5% = 해당 role/패치/티어에서 픽률 0.5% 이상만 후보로 사용
           </div>
@@ -1024,7 +1000,9 @@ export default function RecommendPage() {
             <div className="v">{effectiveToken ? "(set)" : "(empty)"}</div>
 
             <div className="k">health</div>
-            <div className="v">{bridgeOk ? "OK" : "FAIL"} {bridgeMsg ? `— ${bridgeMsg}` : ""}</div>
+            <div className="v">
+              {bridgeOk ? "OK" : "FAIL"} {bridgeMsg ? `— ${bridgeMsg}` : ""}
+            </div>
 
             <div className="k">phase</div>
             <div className="v">{phase}</div>
@@ -1032,8 +1010,12 @@ export default function RecommendPage() {
 
           <div style={{ height: 10 }} />
           <div className="row">
-            <button className="btn" onClick={() => refreshBridgeHealth({ silent: false })}>Health now</button>
-            <button className="btn" onClick={pullBridgeStateOnce}>Pull state once</button>
+            <button className="btn" onClick={() => refreshBridgeHealth({ silent: false })}>
+              Health now
+            </button>
+            <button className="btn" onClick={pullBridgeStateOnce}>
+              Pull state once
+            </button>
             <label className="p" style={{ display: "flex", alignItems: "center", gap: 8, margin: 0 }}>
               <input type="checkbox" checked={autoPull} onChange={(e) => setAutoPull(e.target.checked)} />
               자동 Pull (state: 1.2s)
@@ -1058,6 +1040,12 @@ export default function RecommendPage() {
               idToName,
               onRemove: (cid) => removeIdFromText(setBansText, bansText, cid),
             })}
+            {showAdvanced ? (
+              <div style={{ marginTop: 10 }}>
+                <div className="p" style={{ fontWeight: 800 }}>bans (IDs)</div>
+                <input className="input" value={bansText} onChange={(e) => setBansText(e.target.value)} />
+              </div>
+            ) : null}
           </div>
 
           <div className="card" style={{ flex: 1, minWidth: 320 }}>
@@ -1067,6 +1055,12 @@ export default function RecommendPage() {
               idToName,
               onRemove: (cid) => removeIdFromText(setEnemyText, enemyText, cid),
             })}
+            {showAdvanced ? (
+              <div style={{ marginTop: 10 }}>
+                <div className="p" style={{ fontWeight: 800 }}>enemy_picks (IDs)</div>
+                <input className="input" value={enemyText} onChange={(e) => setEnemyText(e.target.value)} />
+              </div>
+            ) : null}
           </div>
         </div>
 
@@ -1137,8 +1131,15 @@ export default function RecommendPage() {
 
           <div className="row">
             <div style={{ width: 180 }}>
-              <div className="p" style={{ fontWeight: 800 }}>min_games (backend: >= 1)</div>
-              <input className="input" type="number" min="1" value={minGames} onChange={(e) => setMinGames(e.target.value)} />
+              {/* ✅ JSX 텍스트에서 '>'는 escape 해야 Vercel 빌드가 안 터짐 */}
+              <div className="p" style={{ fontWeight: 800 }}>min_games (backend: &gt;= 1)</div>
+              <input
+                className="input"
+                type="number"
+                min="1"
+                value={minGames}
+                onChange={(e) => setMinGames(e.target.value)}
+              />
               <div className="p" style={{ marginTop: 6, fontSize: 12, opacity: 0.9 }}>
                 지금 백엔드 스키마가 <b>min_games ≥ 1</b> 강제라서 0은 전송하면 에러가 납니다.
               </div>
