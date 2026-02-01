@@ -61,16 +61,16 @@ export function loadRecommendPrefs() {
 
     allyByRole: asObj(j.allyByRole, {}),
 
-    // ✅ minGames는 1이 최소 (기본 1)
+    // ✅ minGames는 1이 최소
     minGames: asInt(j.minGames, 1),
     topN: asInt(j.topN, 10),
 
     autoPull: asBool(j.autoPull, true),
 
-    // ✅ NEW: 입력 모드 (기본 자동)
+    // ✅ 입력 모드
     manualInput: asBool(j.manualInput, false),
 
-    // ✅ NEW: 자동 추천(확정 이벤트 기반) (기본 ON)
+    // ✅ NEW: 락인 시 자동 추천
     autoRecommend: asBool(j.autoRecommend, true),
 
     showAdvanced: asBool(j.showAdvanced, false),

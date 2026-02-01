@@ -177,7 +177,11 @@ function renderIdChips({ ids, idToName, onRemove }) {
   return (
     <div style={{ marginTop: 6 }}>
       {ids.map((cid) => (
-        <Chip key={cid} label={`${idToName?.[cid] || "UNKNOWN"} (${cid})`} onRemove={onRemove ? () => onRemove(cid) : null} />
+        <Chip
+          key={cid}
+          label={`${idToName?.[cid] || "UNKNOWN"} (${cid})`}
+          onRemove={onRemove ? () => onRemove(cid) : null}
+        />
       ))}
     </div>
   );
@@ -187,14 +191,11 @@ function resolveChampionIdByName(input, { nameToId, normToId }) {
   const q = String(input || "").trim();
   if (!q) return { id: null, candidates: [] };
 
-  // 1) 숫자 입력이면 id로 처리
   const asNum = parseInt(q, 10);
   if (Number.isFinite(asNum) && asNum !== 0) return { id: asNum, candidates: [] };
 
-  // 2) exact name
   if (nameToId && nameToId[q]) return { id: parseInt(nameToId[q], 10), candidates: [] };
 
-  // 3) normalized exact
   const nq = norm(q);
   if (normToId && normToId[nq]) return { id: normToId[nq], candidates: [] };
 
@@ -244,21 +245,23 @@ function ScoreBar({ value }) {
   );
 }
 
-/** actionsRaw: [[{...}]] 형태를 안전하게 flat */
+/** =========================
+ * ✅ actionsRaw 기반 확정(락인) 밴/픽 추출
+ * ========================= */
 function flattenActions(actionsRaw) {
   const out = [];
   if (!Array.isArray(actionsRaw)) return out;
-  for (const turn of actionsRaw) {
-    if (!Array.isArray(turn)) continue;
-    for (const a of turn) {
+  for (const row of actionsRaw) {
+    if (!Array.isArray(row)) continue;
+    for (const a of row) {
       if (a && typeof a === "object") out.push(a);
     }
   }
   return out;
 }
 
-function posToRole(assignedPosition) {
-  const pos = String(assignedPosition || "").toLowerCase();
+function toRoleFromAssignedPosition(pos) {
+  const p = String(pos || "").toLowerCase();
   const map = {
     top: "TOP",
     jungle: "JUNGLE",
@@ -270,81 +273,96 @@ function posToRole(assignedPosition) {
     support: "UTILITY",
     sup: "UTILITY",
   };
-  return map[pos] || "";
+  return map[p] || null;
 }
 
-/**
- * ✅ "확정(completed)된 밴/픽"만 뽑아내는 extractor
- * - hover(바꾸는 중) championId는 반영 안 함
- * - actionsRaw가 없으면 fallback(old 방식)
- */
-function extractConfirmedFromState(state) {
-  const actions = flattenActions(state?.actionsRaw || state?.actions || []);
-  const banActions = actions.filter((a) => String(a?.type || "") === "ban");
-  const pickActions = actions.filter((a) => String(a?.type || "") === "pick");
+function buildCellIdToRoleFromMyTeam(state) {
+  const out = {};
+  const myTeam = Array.isArray(state?.myTeam) ? state.myTeam : [];
+  for (const p of myTeam) {
+    const cellId = Number(p?.cellId);
+    if (!Number.isFinite(cellId)) continue;
+    const role = toRoleFromAssignedPosition(p?.assignedPosition);
+    if (role) out[cellId] = role;
+  }
+  return out;
+}
 
-  const completedBanActions = banActions.filter((a) => a?.completed === true);
-  const completedPickActions = pickActions.filter((a) => a?.completed === true);
+function extractConfirmedFromActions(state, { myRole }) {
+  const actions = flattenActions(state?.actionsRaw);
 
-  const banTotal = banActions.length;
-  const completedBanCount = completedBanActions.length;
-  const bansComplete = banTotal > 0 && completedBanCount === banTotal;
-
-  const pickTotal = pickActions.length;
-  const completedPickCount = completedPickActions.length;
-
-  // 확정 ban champIds
   const bans = [];
-  for (const a of completedBanActions) {
-    const cid = parseInt(a?.championId || 0, 10);
-    if (Number.isFinite(cid) && cid !== 0 && !bans.includes(cid)) bans.push(cid);
-  }
-
-  // 확정 pick: cellId -> champId
-  const pickByCellId = {};
-  for (const a of completedPickActions) {
-    const cid = parseInt(a?.championId || 0, 10);
-    const cell = parseInt(a?.actorCellId ?? -1, 10);
-    if (!Number.isFinite(cid) || cid === 0) continue;
-    if (!Number.isFinite(cell) || cell < 0) continue;
-    pickByCellId[cell] = cid;
-  }
-
-  // 팀별 확정 pick 목록 구성
   const enemy = [];
-  const allyByRole = { TOP: [], JUNGLE: [], MIDDLE: [], BOTTOM: [], UTILITY: [] };
+  const allyByRole = emptyAlly();
 
-  for (const p of state?.theirTeam || []) {
-    const cell = parseInt(p?.cellId ?? -1, 10);
-    const cid = Number.isFinite(cell) ? pickByCellId[cell] : 0;
-    if (Number.isFinite(cid) && cid !== 0 && !enemy.includes(cid)) enemy.push(cid);
-  }
+  const cellIdToRole = buildCellIdToRoleFromMyTeam(state);
+  const localCellId = Number(state?.localPlayerCellId);
 
-  for (const p of state?.myTeam || []) {
-    const cell = parseInt(p?.cellId ?? -1, 10);
-    const cid = Number.isFinite(cell) ? pickByCellId[cell] : 0;
+  let completedBanTotal = 0;
+  let banTotal = 0;
+
+  let completedPickTotal = 0;
+  let myPickCompleted = false;
+
+  for (const a of actions) {
+    const type = String(a?.type || "").toLowerCase();
+    const completed = Boolean(a?.completed);
+
+    if (type === "ban") banTotal += 1;
+    if (type === "ban" && completed) completedBanTotal += 1;
+
+    if (type !== "ban" && type !== "pick") continue;
+    if (!completed) continue;
+
+    const cid = parseInt(a?.championId || 0, 10);
     if (!Number.isFinite(cid) || cid === 0) continue;
 
-    const role = posToRole(p?.assignedPosition);
-    if (role && !allyByRole[role].includes(cid)) allyByRole[role].push(cid);
+    if (type === "ban") {
+      if (!bans.includes(cid)) bans.push(cid);
+      continue;
+    }
+
+    // pick
+    completedPickTotal += 1;
+
+    const actorCellId = Number(a?.actorCellId);
+    const isAllyAction = Boolean(a?.isAllyAction);
+
+    if (Number.isFinite(localCellId) && Number.isFinite(actorCellId) && actorCellId === localCellId) {
+      myPickCompleted = true;
+    }
+
+    if (!isAllyAction) {
+      if (!enemy.includes(cid)) enemy.push(cid);
+    } else {
+      // ally pick: role 매핑이 있으면 넣고, 없으면 localPlayer만 myRole로라도 넣음
+      let role = null;
+
+      if (Number.isFinite(actorCellId) && cellIdToRole[actorCellId]) role = cellIdToRole[actorCellId];
+      if (!role && Number.isFinite(localCellId) && Number.isFinite(actorCellId) && actorCellId === localCellId) role = myRole;
+
+      if (role && ROLES.includes(role) && !allyByRole[role].includes(cid)) {
+        allyByRole[role].push(cid);
+      }
+    }
   }
 
-  // 내 픽 확정 여부
-  const myCell = parseInt(state?.localPlayerCellId ?? -1, 10);
-  const myPickId = Number.isFinite(myCell) ? (pickByCellId[myCell] || 0) : 0;
-  const myPickLocked = Number.isFinite(myPickId) && myPickId !== 0;
+  const bansAllDone = banTotal > 0 && completedBanTotal >= banTotal;
+
+  // 트리거용 키(정렬해서 안정화)
+  const bansKey = bans.slice().sort((a, b) => a - b).join(",");
+  const enemyKey = enemy.slice().sort((a, b) => a - b).join(",");
+  const allyKey = ROLES.map((r) => `${r}:${(allyByRole[r] || []).slice().sort((a, b) => a - b).join(",")}`).join("|");
 
   return {
     bans,
     enemy,
     allyByRole,
-    banTotal,
-    completedBanCount,
-    bansComplete,
-    pickTotal,
-    completedPickCount,
-    myPickLocked,
-    myPickId,
+    bansAllDone,
+    completedPickTotal,
+    myPickCompleted,
+    keys: { bansKey, enemyKey, allyKey },
+    debug: { banTotal, completedBanTotal },
   };
 }
 
@@ -359,12 +377,11 @@ export default function RecommendPage() {
 
   const [autoPull, setAutoPull] = useState(true);
 
-  // ✅ 입력 모드(기본 자동/브릿지)
+  // ✅ NEW: 입력 모드
   const [manualInput, setManualInput] = useState(false);
 
-  // ✅ NEW: 자동 추천(확정 이벤트 기반)
+  // ✅ NEW: 확정(락인) 시 자동 추천
   const [autoRecommend, setAutoRecommend] = useState(true);
-  const [autoRecMsg, setAutoRecMsg] = useState("");
 
   const DEFAULT_DB_PATH =
     typeof window !== "undefined" && (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1")
@@ -422,12 +439,17 @@ export default function RecommendPage() {
 
   const prefsLoadedRef = useRef(false);
 
-  // ✅ 자동추천 상태(폴링 중 중복 호출 방지)
-  const autoRecInFlightRef = useRef(false);
-  const autoRecDoneRef = useRef(false); // 내 픽 확정 후 true => 이후 자동추천 stop
-  const prevBanCompleteRef = useRef(false);
-  const prevCompletedPickCountRef = useRef(0);
-  const lastAutoSigRef = useRef(""); // 동일 상태 연타 방지
+  // ✅ 자동 추천 트리거 상태(세션 단위)
+  const autoRef = useRef({
+    sessionSig: "",
+    bansTriggered: false,
+    lastCompletedPickTotal: 0,
+    stoppedAfterMyPick: false,
+    lastTriggerKey: "",
+  });
+
+  // ✅ 자동 추천 디바운스
+  const autoTimerRef = useRef(null);
 
   useEffect(() => {
     if (prefsLoadedRef.current) return;
@@ -463,7 +485,9 @@ export default function RecommendPage() {
     if (typeof p.minPickRatePct !== "undefined") setMinPickRatePct(Number(p.minPickRatePct) || 0.5);
 
     setManualInput(Boolean(p.manualInput));
-    setAutoRecommend(Boolean(p.autoRecommend));
+
+    // ✅ NEW
+    if (typeof p.autoRecommend !== "undefined") setAutoRecommend(Boolean(p.autoRecommend));
   }, []);
 
   const saveTimerRef = useRef(null);
@@ -487,7 +511,7 @@ export default function RecommendPage() {
         topN: Math.max(1, Number(topN) || 10),
         autoPull,
         manualInput,
-        autoRecommend,
+        autoRecommend, // ✅ NEW
         showAdvanced,
         showRawResults,
         showRawState,
@@ -618,6 +642,183 @@ export default function RecommendPage() {
     }
   }
 
+  function resetAutoSession() {
+    autoRef.current = {
+      sessionSig: "",
+      bansTriggered: false,
+      lastCompletedPickTotal: 0,
+      stoppedAfterMyPick: false,
+      lastTriggerKey: "",
+    };
+  }
+
+  function scheduleAutoRecommend(reason, triggerKey) {
+    // manual 모드면 자동 추천 X
+    if (manualInput) return;
+    if (!autoRecommend) return;
+    if (apiRunning) return;
+
+    // 한번 띄운 뒤 같은 triggerKey면 재실행 방지
+    if (triggerKey && autoRef.current.lastTriggerKey === triggerKey) return;
+
+    if (autoTimerRef.current) clearTimeout(autoTimerRef.current);
+    autoTimerRef.current = setTimeout(() => {
+      autoRef.current.lastTriggerKey = triggerKey || `${Date.now()}`;
+      runRecommend();
+    }, 150);
+  }
+
+  async function pullBridgeStateOnce() {
+    if (!effectiveBase) return;
+    if (stateInFlightRef.current) return;
+    stateInFlightRef.current = true;
+
+    try {
+      const j = await bridgeState({
+        bridgeBase: effectiveBase,
+        bridgeToken: effectiveToken,
+        timeoutMs: BRIDGE_TIMEOUT_MS,
+      });
+
+      if (j && j.ok && j.state) {
+        setLastState(j.state);
+        setPhase(j.state.phase || "Unknown");
+        setBridgeOk(true);
+
+        // ✅ ChampSelect 세션 시그니처(대충 reset 감지용)
+        const actions = flattenActions(j.state.actionsRaw);
+        const firstId = actions.length ? String(actions[0]?.id ?? "") : "";
+        const lastId = actions.length ? String(actions[actions.length - 1]?.id ?? "") : "";
+        const localId = String(j.state.localPlayerCellId ?? "");
+        const sessionSig = `${localId}|${actions.length}|${firstId}|${lastId}`;
+
+        // 세션이 바뀐 것 같으면 자동 트리거 상태 초기화
+        if (autoRef.current.sessionSig && autoRef.current.sessionSig !== sessionSig) {
+          resetAutoSession();
+        }
+        autoRef.current.sessionSig = sessionSig;
+
+        // ✅ AUTO(브릿지) 모드에서만 "확정된 액션" 기반으로 입력 반영 + 자동 추천
+        if (!manualInput) {
+          const confirmed = extractConfirmedFromActions(j.state, { myRole });
+
+          // 입력 반영(확정된 것만)
+          setBansText(idsToText(confirmed.bans));
+          setEnemyText(idsToText(confirmed.enemy));
+
+          const ally2 = sanitizeAlly(confirmed.allyByRole);
+          setAllyByRole(ally2);
+          setAllyJsonText(JSON.stringify(ally2));
+
+          // ===== 자동 추천 트리거 =====
+          // 1) 밴이 "전부 확정" 되는 순간 1회
+          if (confirmed.bansAllDone && !autoRef.current.bansTriggered && !autoRef.current.stoppedAfterMyPick) {
+            autoRef.current.bansTriggered = true;
+            const key = `bans_done|${confirmed.keys.bansKey}|${confirmed.keys.enemyKey}|${confirmed.keys.allyKey}`;
+            scheduleAutoRecommend("bans_done", key);
+          }
+
+          // 2) 확정 pick 개수가 증가할 때마다 1회
+          if (!autoRef.current.stoppedAfterMyPick) {
+            const prev = Number(autoRef.current.lastCompletedPickTotal) || 0;
+            const now = Number(confirmed.completedPickTotal) || 0;
+
+            if (now > prev) {
+              autoRef.current.lastCompletedPickTotal = now;
+              const key = `pick_lock|${now}|${confirmed.keys.bansKey}|${confirmed.keys.enemyKey}|${confirmed.keys.allyKey}`;
+              scheduleAutoRecommend("pick_lock", key);
+            } else {
+              autoRef.current.lastCompletedPickTotal = now;
+            }
+          }
+
+          // 3) 내 픽이 확정되면 이번 세션 자동 추천 종료
+          if (confirmed.myPickCompleted) {
+            autoRef.current.stoppedAfterMyPick = true;
+          }
+        }
+      }
+    } catch {
+      // ignore
+    } finally {
+      stateInFlightRef.current = false;
+    }
+  }
+
+  useEffect(() => {
+    let alive = true;
+
+    if (!effectiveBase) {
+      setBridgeOk(false);
+      setBridgeMsg("bridgeBase is empty (Connect에서 URL 저장 필요)");
+      setPhase("Unknown");
+      setLastState(null);
+      resetAutoSession();
+      return () => {};
+    }
+
+    (async () => {
+      if (!alive) return;
+      await refreshBridgeHealth({ silent: true });
+      if (!alive) return;
+      if (autoPull) await pullBridgeStateOnce();
+    })();
+
+    const healthTimer = setInterval(() => {
+      if (!alive) return;
+      refreshBridgeHealth({ silent: true });
+    }, HEALTH_POLL_MS);
+
+    const stateTimer = setInterval(() => {
+      if (!alive) return;
+      if (!autoPull) return;
+      pullBridgeStateOnce();
+    }, STATE_POLL_MS);
+
+    return () => {
+      alive = false;
+      clearInterval(healthTimer);
+      clearInterval(stateTimer);
+    };
+  }, [effectiveBase, effectiveToken, autoPull, manualInput, myRole, autoRecommend, apiRunning]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    const obj = safeJsonParse(allyJsonText);
+    setAllyByRole(sanitizeAlly(obj));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    setAllyJsonText(JSON.stringify(allyByRole));
+  }, [allyByRole]);
+
+  async function loadMeta({ silent = false } = {}) {
+    setMetaErr("");
+    setMetaLoading(true);
+    try {
+      const j = await apiMeta(dbPath);
+      const patches = Array.isArray(j?.patches) ? j.patches : [];
+      const latest = String(j?.latest_patch || "");
+      setAvailablePatches(patches);
+      setLatestPatch(latest);
+
+      if (patch !== "ALL" && patches.length && !patches.includes(patch)) {
+        setPatch("ALL");
+      }
+    } catch (e) {
+      if (!silent) setMetaErr(String(e?.message || e));
+      setAvailablePatches([]);
+      setLatestPatch("");
+    } finally {
+      setMetaLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    loadMeta({ silent: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dbPath]);
+
   const champPoolIds = useMemo(() => parseIds(champPoolText), [champPoolText]);
   const bansIds = useMemo(() => parseIds(bansText), [bansText]);
   const enemyIds = useMemo(() => parseIds(enemyText), [enemyText]);
@@ -639,7 +840,6 @@ export default function RecommendPage() {
   const [enemyName, setEnemyName] = useState("");
   const [allyNameByRole, setAllyNameByRole] = useState(() => ({ TOP: "", JUNGLE: "", MIDDLE: "", BOTTOM: "", UTILITY: "" }));
 
-  // nameHints: { kind: "pool"|"bans"|"enemy"|"ally", role?: "TOP"... , cands: [id...] }
   const [nameHints, setNameHints] = useState({ kind: "", role: "", cands: [] });
 
   function applyHintPick(kind, cid, role = "") {
@@ -708,21 +908,16 @@ export default function RecommendPage() {
     }
   }
 
-  async function runRecommendWith({ bansIdsOverride, enemyIdsOverride, allyByRoleOverride, reason = "" } = {}) {
-    if (autoRecInFlightRef.current) return;
-    autoRecInFlightRef.current = true;
-
+  async function runRecommend() {
     setApiRunning(true);
     setLastRunAt(new Date().toLocaleTimeString());
     setApiErr("");
     setApiRaw(null);
     setRecs([]);
 
-    // POOL 모드 방어
     if (candidateMode === "POOL" && !champPoolIds.length) {
       setApiErr("POOL 모드인데 champ_pool이 비어있음 (내 챔프폭을 최소 1개 추가해야 함)");
       setApiRunning(false);
-      autoRecInFlightRef.current = false;
       return;
     }
 
@@ -735,9 +930,9 @@ export default function RecommendPage() {
       my_role: myRole,
       use_champ_pool: candidateMode === "POOL",
       champ_pool: candidateMode === "POOL" ? champPoolIds : [],
-      bans: Array.isArray(bansIdsOverride) ? bansIdsOverride : bansIds,
-      enemy_picks: Array.isArray(enemyIdsOverride) ? enemyIdsOverride : enemyIds,
-      ally_picks_by_role: allyByRoleOverride ? allyByRoleOverride : allyByRole,
+      bans: bansIds,
+      enemy_picks: enemyIds,
+      ally_picks_by_role: allyByRole,
       min_games: Math.max(1, Number(minGames) || 1),
       min_pick_rate: minPickRate,
       top_n: Math.max(1, Number(topN) || 10),
@@ -751,7 +946,6 @@ export default function RecommendPage() {
       if (!Array.isArray(j?.recs)) {
         setApiErr("API 응답에 recs가 없음(형식 이상) — Raw API를 확인하세요.");
       }
-      if (reason) setAutoRecMsg(`✅ auto recommend: ${reason}`);
     } catch (e) {
       let msg = "";
       try {
@@ -765,203 +959,10 @@ export default function RecommendPage() {
         msg = String(e);
       }
       setApiErr(msg);
-      if (reason) setAutoRecMsg(`❌ auto recommend failed: ${reason}`);
     } finally {
       setApiRunning(false);
-      autoRecInFlightRef.current = false;
     }
   }
-
-  async function runRecommend() {
-    return await runRecommendWith({ reason: "" });
-  }
-
-  function resetAutoRecSession() {
-    autoRecDoneRef.current = false;
-    prevBanCompleteRef.current = false;
-    prevCompletedPickCountRef.current = 0;
-    lastAutoSigRef.current = "";
-    setAutoRecMsg("");
-  }
-
-  async function pullBridgeStateOnce() {
-    if (!effectiveBase) return;
-    if (stateInFlightRef.current) return;
-    stateInFlightRef.current = true;
-
-    try {
-      const j = await bridgeState({
-        bridgeBase: effectiveBase,
-        bridgeToken: effectiveToken,
-        timeoutMs: BRIDGE_TIMEOUT_MS,
-      });
-
-      if (j && j.ok && j.state) {
-        setLastState(j.state);
-        const nextPhase = j.state.phase || "Unknown";
-        setPhase(nextPhase);
-
-        // ChampSelect 밖으로 나가면 자동추천 세션 리셋
-        if (String(nextPhase) !== "ChampSelect") {
-          resetAutoRecSession();
-        }
-
-        // ✅ 자동 입력 모드에서만 "확정된 값"으로 bans/enemy/ally 갱신
-        if (!manualInput) {
-          const ex = extractConfirmedFromState(j.state);
-
-          // UI 반영(확정된 값만)
-          setBansText(idsToText(ex.bans));
-          setEnemyText(idsToText(ex.enemy));
-          const ally2 = sanitizeAlly(ex.allyByRole);
-          setAllyByRole(ally2);
-          setAllyJsonText(JSON.stringify(ally2));
-
-          // ✅ 자동추천 트리거
-          const canAuto =
-            autoRecommend &&
-            autoPull &&
-            !manualInput &&
-            String(nextPhase) === "ChampSelect" &&
-            !autoRecDoneRef.current &&
-            !autoRecInFlightRef.current;
-
-          if (canAuto) {
-            // 동일 상태 연타 방지용 signature
-            const sig = `B:${ex.bans.slice().sort((a, b) => a - b).join(",")}|E:${ex.enemy
-              .slice()
-              .sort((a, b) => a - b)
-              .join(",")}|P:${ex.completedPickCount}|BC:${ex.bansComplete ? 1 : 0}|MY:${ex.myPickId || 0}`;
-
-            // 트리거 조건:
-            // 1) bansComplete가 false->true 되는 순간 1회
-            // 2) completedPickCount가 증가할 때마다 1회
-            // 3) 내 픽이 확정되는 순간: 그 1회 추천 후 자동추천 종료
-            const banJustCompleted = ex.bansComplete && !prevBanCompleteRef.current;
-            const pickIncreased = ex.completedPickCount > (prevCompletedPickCountRef.current || 0);
-
-            // refs 업데이트는 아래에서
-            let shouldFire = false;
-            let reason = "";
-
-            if (banJustCompleted) {
-              shouldFire = true;
-              reason = "bans completed";
-            } else if (pickIncreased) {
-              shouldFire = true;
-              reason = "pick locked";
-            }
-
-            // 같은 시그니처로 연속 호출 방지
-            if (shouldFire && sig === lastAutoSigRef.current) {
-              shouldFire = false;
-            }
-
-            if (shouldFire) {
-              lastAutoSigRef.current = sig;
-
-              // 추천 호출은 "ex로 만든 확정값"으로 바로 호출(레이스 방지)
-              await runRecommendWith({
-                bansIdsOverride: ex.bans,
-                enemyIdsOverride: ex.enemy,
-                allyByRoleOverride: ally2,
-                reason,
-              });
-
-              // 내 픽 확정이면 여기서 자동추천 종료
-              if (ex.myPickLocked) {
-                autoRecDoneRef.current = true;
-                setAutoRecMsg("✅ auto recommend stopped (my pick locked)");
-              }
-            }
-
-            // refs update
-            prevBanCompleteRef.current = Boolean(ex.bansComplete);
-            prevCompletedPickCountRef.current = Number(ex.completedPickCount) || 0;
-          }
-        }
-
-        setBridgeOk(true);
-      }
-    } catch {
-      // ignore
-    } finally {
-      stateInFlightRef.current = false;
-    }
-  }
-
-  useEffect(() => {
-    let alive = true;
-
-    if (!effectiveBase) {
-      setBridgeOk(false);
-      setBridgeMsg("bridgeBase is empty (Connect에서 URL 저장 필요)");
-      setPhase("Unknown");
-      setLastState(null);
-      return () => {};
-    }
-
-    (async () => {
-      if (!alive) return;
-      await refreshBridgeHealth({ silent: true });
-      if (!alive) return;
-      if (autoPull) await pullBridgeStateOnce();
-    })();
-
-    const healthTimer = setInterval(() => {
-      if (!alive) return;
-      refreshBridgeHealth({ silent: true });
-    }, HEALTH_POLL_MS);
-
-    const stateTimer = setInterval(() => {
-      if (!alive) return;
-      if (!autoPull) return;
-      pullBridgeStateOnce();
-    }, STATE_POLL_MS);
-
-    return () => {
-      alive = false;
-      clearInterval(healthTimer);
-      clearInterval(stateTimer);
-    };
-  }, [effectiveBase, effectiveToken, autoPull, manualInput, autoRecommend]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    const obj = safeJsonParse(allyJsonText);
-    setAllyByRole(sanitizeAlly(obj));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    setAllyJsonText(JSON.stringify(allyByRole));
-  }, [allyByRole]);
-
-  async function loadMeta({ silent = false } = {}) {
-    setMetaErr("");
-    setMetaLoading(true);
-    try {
-      const j = await apiMeta(dbPath);
-      const patches = Array.isArray(j?.patches) ? j.patches : [];
-      const latest = String(j?.latest_patch || "");
-      setAvailablePatches(patches);
-      setLatestPatch(latest);
-
-      if (patch !== "ALL" && patches.length && !patches.includes(patch)) {
-        setPatch("ALL");
-      }
-    } catch (e) {
-      if (!silent) setMetaErr(String(e?.message || e));
-      setAvailablePatches([]);
-      setLatestPatch("");
-    } finally {
-      setMetaLoading(false);
-    }
-  }
-
-  useEffect(() => {
-    loadMeta({ silent: true });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dbPath]);
 
   const best = useMemo(() => {
     if (!recs || !recs.length) return null;
@@ -1037,7 +1038,6 @@ export default function RecommendPage() {
           </div>
 
           {apiErr ? <div style={{ marginTop: 8, fontWeight: 900 }}>❌ {apiErr}</div> : null}
-          {autoRecMsg ? <div style={{ marginTop: 8, fontWeight: 900 }}>{autoRecMsg}</div> : null}
 
           {recs && recs.length ? (
             <div style={{ display: "grid", gap: 10, marginTop: 10 }}>
@@ -1116,18 +1116,17 @@ export default function RecommendPage() {
               setAutoPull(true);
               setManualInput(false);
               setAutoRecommend(true);
-
               setShowAdvanced(false);
               setShowRawResults(false);
               setShowRawState(false);
-
-              resetAutoRecSession();
 
               setApiErr("");
               setApiRaw(null);
               setRecs([]);
               setApiRunning(false);
               setLastRunAt("");
+
+              resetAutoSession();
             }}
           >
             Reset prefs
@@ -1300,10 +1299,13 @@ export default function RecommendPage() {
             <div className="v">{phase}</div>
 
             <div className="k">input mode</div>
-            <div className="v">{manualInput ? "MANUAL(수동)" : "AUTO(브릿지/확정만)"}</div>
+            <div className="v">{manualInput ? "MANUAL(수동)" : "AUTO(브릿지)"}</div>
 
             <div className="k">auto recommend</div>
-            <div className="v">{autoRecommend ? "ON(확정 이벤트)" : "OFF"}</div>
+            <div className="v">
+              {autoRecommend ? "ON" : "OFF"}{" "}
+              {!manualInput && autoRef.current?.stoppedAfterMyPick ? "— (stopped after my pick)" : ""}
+            </div>
           </div>
 
           <div style={{ height: 10 }} />
@@ -1318,7 +1320,7 @@ export default function RecommendPage() {
                 setAutoPull(true);
               }}
               style={{ background: !manualInput ? "rgba(120,140,255,0.25)" : undefined }}
-              title="브릿지 Pull 결과로 bans/enemy/ally가 (확정된 것만) 자동 반영됩니다."
+              title="브릿지 Pull 결과로 bans/enemy/ally가 자동 반영됩니다."
             >
               자동 입력
             </button>
@@ -1328,6 +1330,7 @@ export default function RecommendPage() {
               onClick={() => {
                 setManualInput(true);
                 setAutoPull(true);
+                resetAutoSession();
               }}
               style={{ background: manualInput ? "rgba(120,140,255,0.25)" : undefined }}
               title="수동 입력으로 전환하면 브릿지가 입력값을 덮어쓰지 않습니다."
@@ -1346,12 +1349,10 @@ export default function RecommendPage() {
                 checked={autoRecommend}
                 onChange={(e) => {
                   setAutoRecommend(e.target.checked);
-                  resetAutoRecSession();
+                  resetAutoSession();
                 }}
-                disabled={manualInput}
-                title={manualInput ? "수동 입력 모드에서는 자동추천이 동작하지 않음" : "밴/픽 확정 이벤트에서 자동으로 추천을 실행"}
               />
-              자동추천(확정)
+              락인 시 자동 추천
             </label>
 
             <label className="p" style={{ display: "flex", alignItems: "center", gap: 8, margin: 0 }}>
@@ -1366,7 +1367,7 @@ export default function RecommendPage() {
             </div>
           ) : (
             <div className="p" style={{ marginTop: 8, fontWeight: 900 }}>
-              ✅ 자동 입력 모드: 브릿지 Pull 결과가 <b>확정(completed)된 밴/픽</b>만 입력에 반영됩니다.
+              ✅ 자동 입력 모드: <b>actionsRaw(completed)</b> 기준으로 확정된 밴/픽만 반영하고, 락인 이벤트마다 자동 추천을 1회 실행합니다.
             </div>
           )}
 
@@ -1417,7 +1418,7 @@ export default function RecommendPage() {
               </div>
             ) : (
               <div className="p" style={{ marginTop: 6 }}>
-                (자동 입력 모드) — 브릿지 Pull로 <b>확정된 밴만</b> 반영됩니다. 수동으로 넣으려면 <b>수동 입력</b>으로 전환하세요.
+                (자동 입력 모드) — 확정된 밴만 자동 반영됩니다. 수동으로 넣으려면 <b>수동 입력</b>으로 전환하세요.
               </div>
             )}
 
@@ -1475,7 +1476,7 @@ export default function RecommendPage() {
               </div>
             ) : (
               <div className="p" style={{ marginTop: 6 }}>
-                (자동 입력 모드) — 브릿지 Pull로 <b>확정된 픽만</b> 반영됩니다. 수동으로 넣으려면 <b>수동 입력</b>으로 전환하세요.
+                (자동 입력 모드) — 확정된 픽만 자동 반영됩니다. 수동으로 넣으려면 <b>수동 입력</b>으로 전환하세요.
               </div>
             )}
 
@@ -1498,7 +1499,7 @@ export default function RecommendPage() {
 
         <div className="card">
           <div className="h2">Ally Picks (by role)</div>
-          <div className="p">자동 모드에선 브릿지 Pull로 확정된 픽만 반영. 수동 모드에선 아래 입력으로 추가/제거.</div>
+          <div className="p">자동 모드에선 <b>completed pick</b>만 반영. 수동 모드에선 아래 입력으로 추가/제거.</div>
 
           <div style={{ marginTop: 10 }}>
             {ROLES.map((r) => (
@@ -1577,7 +1578,7 @@ export default function RecommendPage() {
                   </div>
                 ) : (
                   <div className="p" style={{ marginTop: 6 }}>
-                    (자동 입력 모드) — <b>확정된 픽만</b> 자동 반영됩니다. 수동 입력 UI는 <b>수동 입력</b>으로 전환하면 나타납니다.
+                    (자동 입력 모드) — 수동 입력 UI는 숨김. <b>수동 입력</b>으로 전환하면 추가 입력이 나타납니다.
                   </div>
                 )}
 
