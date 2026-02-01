@@ -650,10 +650,27 @@ export default function RecommendPage() {
         setApiErr("API 응답에 recs가 없음(형식 이상) — Raw API를 확인하세요.");
       }
     } catch (e) {
-      setApiErr(String(e?.message || e));
+      // ✅ object/array/detail까지 전부 사람이 읽게 문자열화
+      let msg = "";
+      try {
+        if (e && typeof e === "object") {
+          // Error 형태면 message 우선
+          if (typeof e.message === "string" && e.message.trim()) {
+            msg = e.message;
+          } else {
+            msg = JSON.stringify(e, null, 2);
+          }
+        } else {
+          msg = String(e);
+        }
+      } catch {
+        msg = String(e);
+      }
+      setApiErr(msg);
     } finally {
       setApiRunning(false);
     }
+
   }
 
   const best = useMemo(() => {
