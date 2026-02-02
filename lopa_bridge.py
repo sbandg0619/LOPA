@@ -1,10 +1,14 @@
 # lopa_bridge.py
 from __future__ import annotations
 
+import atexit
 import json
 import os
-import time
 import secrets
+import socket
+import subprocess
+import sys
+import time
 import webbrowser
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -103,23 +107,26 @@ def _load_or_create_persistent_token(here: Path) -> str:
     try:
         token_file.write_text(t, encoding="utf-8")
     except Exception:
-        # 파일 저장 실패해도 동작은 하게
         pass
     return t
 
 
-def _open_pairing_url(bridge_url: str, token: str):
+def _open_pairing_url(bridge_url: str, token: str, api_url: str | None = None):
     """
     브라우저 자동 오픈:
-      - LOPA_WEB_CONNECT_URL 이 있으면 그대로 사용 (예: http://localhost:3000/connect)
+      - LOPA_WEB_CONNECT_URL 이 있으면 그대로 사용
       - 없으면 기본값: http://localhost:3000/connect
     query:
-      ?bridge=<bridge_url>&token=<token>
+      ?bridge=<bridge_url>&token=<token>&api=<api_url?>
     """
     connect_base = (os.getenv("LOPA_WEB_CONNECT_URL") or "http://localhost:3000/connect").strip()
     connect_base = connect_base.rstrip("/")
 
-    q = urlencode({"bridge": bridge_url, "token": token})
+    qobj = {"bridge": bridge_url, "token": token}
+    if api_url:
+        qobj["api"] = api_url
+
+    q = urlencode(qobj)
     url = f"{connect_base}?{q}"
 
     auto = (os.getenv("LOPA_BRIDGE_AUTO_OPEN") or "1").strip().lower()
@@ -131,6 +138,190 @@ def _open_pairing_url(bridge_url: str, token: str):
     except Exception:
         pass
     return url
+
+
+# -------------------------
+# API auto-start helpers
+# -------------------------
+def _port_is_listening(host: str, port: int, timeout: float = 0.25) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _wait_http_ok(url: str, timeout_sec: float = 20.0, interval: float = 0.5) -> tuple[bool, str]:
+    t0 = time.time()
+    last_err = ""
+    while time.time() - t0 < timeout_sec:
+        try:
+            r = requests.get(url, timeout=1.5)
+            if r.status_code == 200:
+                return True, "OK"
+            last_err = f"HTTP {r.status_code}"
+        except Exception as e:
+            last_err = str(e)
+        time.sleep(interval)
+    return False, last_err or "timeout"
+
+
+def _wait_api_meta_ready(api_url: str, timeout_sec: float = 25.0, interval: float = 0.6) -> tuple[bool, str]:
+    """
+    콜드스타트/초기 DB 쿼리 타이밍 문제 방지용:
+    /meta 가 정상으로 latest_patch를 내줄 때까지 재시도.
+    """
+    meta_url = api_url.rstrip("/") + "/meta"
+    t0 = time.time()
+    last = ""
+    while time.time() - t0 < timeout_sec:
+        try:
+            r = requests.get(meta_url, timeout=2.0)
+            if r.status_code == 200:
+                j = r.json()
+                latest = str(j.get("latest_patch") or "").strip()
+                ok = bool(j.get("ok"))
+                # "unknown" 또는 빈 문자열이면 아직 준비 덜 됐다고 판단
+                if ok and latest and latest.lower() != "unknown":
+                    return True, f"OK latest_patch={latest}"
+                last = f"meta not ready (ok={ok}, latest_patch={latest or 'empty'})"
+            else:
+                last = f"HTTP {r.status_code}"
+        except Exception as e:
+            last = str(e)
+
+        time.sleep(interval)
+
+    return False, last or "timeout"
+
+
+def _start_api_if_needed(here: Path) -> dict:
+    """
+    브릿지가 API(uvicorn)를 같이 켜는 기능.
+    기본 ON. 끄려면: LOPA_API_AUTO_START=0
+
+    설정:
+      LOPA_API_HOST=127.0.0.1
+      LOPA_API_PORT=8000
+      LOPA_API_APP=api_server:app
+      LOPA_API_HEALTH_PATH=/health
+      LOPA_API_LOG_FILE=lopa_api.log
+      LOPA_API_WARMUP_META=1  (기본 1)
+    """
+    auto = (os.getenv("LOPA_API_AUTO_START") or "1").strip().lower()
+    if auto in ("0", "false", "no", "off"):
+        return {
+            "enabled": False,
+            "started": False,
+            "url": None,
+            "health_url": None,
+            "msg": "LOPA_API_AUTO_START=0",
+            "proc": None,
+            "meta_ready": False,
+        }
+
+    host = (os.getenv("LOPA_API_HOST") or "127.0.0.1").strip()
+    port = int(os.getenv("LOPA_API_PORT") or "8000")
+    app = (os.getenv("LOPA_API_APP") or "api_server:app").strip()
+    health_path = (os.getenv("LOPA_API_HEALTH_PATH") or "/health").strip()
+    if not health_path.startswith("/"):
+        health_path = "/" + health_path
+
+    warmup_meta = (os.getenv("LOPA_API_WARMUP_META") or "1").strip().lower() not in ("0", "false", "no", "off")
+
+    api_url = f"http://{host}:{port}"
+    health_url = api_url + health_path
+
+    # 이미 떠 있으면 스킵 + (선택) meta 워밍업
+    if _port_is_listening(host, port):
+        ok, msg = _wait_http_ok(health_url, timeout_sec=3.0, interval=0.3)
+        meta_ok = False
+        meta_msg = ""
+        if warmup_meta and ok:
+            meta_ok, meta_msg = _wait_api_meta_ready(api_url, timeout_sec=10.0, interval=0.5)
+        return {
+            "enabled": True,
+            "started": False,
+            "url": api_url,
+            "health_url": health_url,
+            "msg": f"port {port} already in use (api may be already running). health={ok} {msg}. meta={meta_ok} {meta_msg}".strip(),
+            "proc": None,
+            "meta_ready": meta_ok,
+        }
+
+    # 어떤 파이썬으로 uvicorn 실행할지:
+    py = (os.getenv("PY") or "").strip() or sys.executable
+
+    # 로그 파일
+    log_file = (os.getenv("LOPA_API_LOG_FILE") or "lopa_api.log").strip()
+    log_path = here / log_file
+    cmd = [py, "-m", "uvicorn", app, "--host", host, "--port", str(port)]
+
+    try:
+        lf = open(log_path, "a", encoding="utf-8", errors="ignore")
+    except Exception:
+        lf = None
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(here),
+            stdout=lf if lf else None,
+            stderr=lf if lf else None,
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0,
+        )
+    except Exception as e:
+        if lf:
+            try:
+                lf.close()
+            except Exception:
+                pass
+        return {
+            "enabled": True,
+            "started": False,
+            "url": api_url,
+            "health_url": health_url,
+            "msg": f"FAILED to start api: {e}",
+            "proc": None,
+            "meta_ready": False,
+        }
+
+    def _cleanup():
+        try:
+            if proc and proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=3.0)
+                except Exception:
+                    proc.kill()
+        except Exception:
+            pass
+        finally:
+            if lf:
+                try:
+                    lf.close()
+                except Exception:
+                    pass
+
+    atexit.register(_cleanup)
+
+    ok, msg = _wait_http_ok(health_url, timeout_sec=20.0, interval=0.5)
+
+    meta_ok = False
+    meta_msg = ""
+    if warmup_meta and ok:
+        # 핵심: health OK 이후 /meta가 정상 latest_patch를 줄 때까지 워밍업
+        meta_ok, meta_msg = _wait_api_meta_ready(api_url, timeout_sec=25.0, interval=0.6)
+
+    return {
+        "enabled": True,
+        "started": True,
+        "url": api_url,
+        "health_url": health_url,
+        "msg": f"started. health={ok} {msg}. meta={meta_ok} {meta_msg}. log={str(log_path)}".strip(),
+        "proc": proc,
+        "meta_ready": meta_ok,
+    }
 
 
 class LCU:
@@ -157,9 +348,6 @@ class LCU:
             return {"_raw": r.text}
 
     def ping(self) -> tuple[bool, str]:
-        """
-        헬스 체크는 "응답이 오면 OK"로 판단.
-        """
         try:
             phase = self.get("/lol-gameflow/v1/gameflow-phase")
             if isinstance(phase, dict) and phase.get("_error"):
@@ -189,7 +377,7 @@ class LCU:
         out["myTeam"] = sess.get("myTeam") or []
         out["theirTeam"] = sess.get("theirTeam") or []
         out["localPlayerCellId"] = sess.get("localPlayerCellId")
-        out["actionsRaw"] = sess.get("actions")  # app.py 호환용
+        out["actionsRaw"] = sess.get("actions")
 
         return out
 
@@ -199,7 +387,7 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "LOPABridge/0.4"
+    server_version = "LOPABridge/0.6"
 
     def _send_json(self, code: int, obj: dict):
         data = json.dumps(obj, ensure_ascii=False).encode("utf-8")
@@ -243,6 +431,38 @@ class Handler(BaseHTTPRequestHandler):
             ok, msg = self.server.lcu.ping()
             return self._send_json(200, {"ok": ok, "msg": msg, "ts": int(time.time())})
 
+        if path == "/api_health":
+            info = getattr(self.server, "api_info", {}) or {}
+            health_url = info.get("health_url")
+            if not health_url:
+                return self._send_json(200, {"ok": False, "msg": "api not configured", "ts": int(time.time())})
+
+            try:
+                r = requests.get(health_url, timeout=1.5)
+                return self._send_json(
+                    200,
+                    {
+                        "ok": r.status_code == 200,
+                        "msg": "OK" if r.status_code == 200 else f"HTTP {r.status_code}",
+                        "api_url": info.get("url"),
+                        "health_url": health_url,
+                        "meta_ready": bool(info.get("meta_ready", False)),
+                        "ts": int(time.time()),
+                    },
+                )
+            except Exception as e:
+                return self._send_json(
+                    200,
+                    {
+                        "ok": False,
+                        "msg": str(e),
+                        "api_url": info.get("url"),
+                        "health_url": health_url,
+                        "meta_ready": bool(info.get("meta_ready", False)),
+                        "ts": int(time.time()),
+                    },
+                )
+
         if path == "/state":
             try:
                 state = self.server.lcu.champ_select_state()
@@ -263,6 +483,10 @@ def main():
     here = Path(__file__).resolve().parent
     loaded_envs = _load_env_candidates()
 
+    # 0) API 먼저 자동 실행 + /meta 워밍업(최신 패치 unknown 방지)
+    api_info = _start_api_if_needed(here)
+
+    # 1) lockfile 찾기
     lockfile = (os.getenv("LOL_LOCKFILE") or "").strip()
     if not lockfile:
         for cand in _guess_lockfile_paths():
@@ -287,17 +511,18 @@ def main():
     host = (os.getenv("LOPA_BRIDGE_HOST") or "127.0.0.1").strip()
     port = int(os.getenv("LOPA_BRIDGE_PORT") or "12145")
 
-    # ✅ 토큰 고정(ENV 우선, 없으면 파일 저장/재사용)
     token = _load_or_create_persistent_token(here)
-
     lcu = LCU(lockfile)
 
     httpd = ThreadedHTTPServer((host, port), Handler)
     httpd.lcu = lcu
     httpd.token = token
+    httpd.api_info = api_info
 
     bridge_url = f"http://{host}:{port}"
-    pair_url = _open_pairing_url(bridge_url=bridge_url, token=token)
+
+    # 핵심: API meta 워밍업까지(가능한 만큼) 끝낸 후 connect 오픈
+    pair_url = _open_pairing_url(bridge_url=bridge_url, token=token, api_url=api_info.get("url"))
 
     print("==================================================")
     print("LOPA Bridge running")
@@ -306,8 +531,12 @@ def main():
     print(f"- bind        : {bridge_url}")
     print(f"- health      : {bridge_url}/health?token={token}")
     print(f"- state       : {bridge_url}/state?token={token}")
+    print(f"- api_health  : {bridge_url}/api_health?token={token}")
     print(f"- token       : {token}")
     print(f"- pair url    : {pair_url}")
+    print(f"- api auto    : enabled={api_info.get('enabled')} started={api_info.get('started')} url={api_info.get('url')}")
+    print(f"- api meta    : meta_ready={api_info.get('meta_ready')}")
+    print(f"- api msg     : {api_info.get('msg')}")
     if loaded_envs:
         print("- loaded env  :")
         for x in loaded_envs:

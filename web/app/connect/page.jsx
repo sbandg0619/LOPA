@@ -2,14 +2,19 @@
 
 // web/app/connect/page.jsx
 // 목적:
-// 1) 여기서 저장한 토큰/URL이 Recommend에서 동일하게 읽히게 함.
-// 2) /connect?bridge=...&token=...&next=/recommend 로 들어오면
-//    자동으로 저장 후 next로 이동(=자동이동 복구)
+// 1) 여기서 저장한 bridge/token/api가 Recommend에서 동일하게 읽히게 함.
+// 2) /connect?bridge=...&token=...&api=...&next=/recommend 로 들어오면
+//    자동으로 저장 후 next로 이동(=자동이동).
+//
+// ✅ Fix:
+// - auto-save 직후 router.replace(SPA)로 이동하면 Recommend의 초기 fetch 타이밍 레이스가 생길 수 있음
+// - 그래서 auto 이동은 window.location.replace(하드 네비게이션)로 변경
+// - api= 파라미터도 같이 저장해서 Render(슬립) 대신 로컬 API를 안정적으로 사용 가능
 
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { bridgeHealth, bridgeState } from "../../lib/bridge";
-import { getBridgeBase, getBridgeToken, setBridgeConfig, clearBridgeConfig } from "../../lib/constants";
+import { getBridgeConfig, setBridgeConfig, clearBridgeConfig } from "../../lib/constants";
 
 function ConnectInner() {
   const router = useRouter();
@@ -17,46 +22,69 @@ function ConnectInner() {
 
   const [bridgeBase, setBridgeBase] = useState("");
   const [bridgeToken, setBridgeToken] = useState("");
+  const [apiBase, setApiBase] = useState("");
+
   const [msg, setMsg] = useState("");
   const [raw, setRaw] = useState(null);
 
   // URL params (있으면 자동 저장+이동)
   const qsBridge = useMemo(() => (sp.get("bridge") || "").trim(), [sp]);
   const qsToken = useMemo(() => (sp.get("token") || "").trim(), [sp]);
+  const qsApi = useMemo(() => (sp.get("api") || "").trim(), [sp]);
   const qsNext = useMemo(() => (sp.get("next") || "/recommend").trim() || "/recommend", [sp]);
 
   // 1) 최초: localStorage 값 로드
   useEffect(() => {
-    setBridgeBase(getBridgeBase());
-    setBridgeToken(getBridgeToken());
+    const cfg = getBridgeConfig();
+    setBridgeBase(cfg?.bridgeBase || "http://127.0.0.1:12145");
+    setBridgeToken(cfg?.bridgeToken || "");
+    setApiBase(cfg?.apiBase || "http://127.0.0.1:8000");
   }, []);
 
   // 2) URL 파라미터가 있으면 입력칸에도 반영 (보이는 값)
   useEffect(() => {
     if (qsBridge) setBridgeBase(qsBridge);
     if (qsToken) setBridgeToken(qsToken);
-  }, [qsBridge, qsToken]);
+    if (qsApi) setApiBase(qsApi);
+  }, [qsBridge, qsToken, qsApi]);
 
-  const effectiveBase = useMemo(() => (bridgeBase || "").trim().replace(/\/$/, ""), [bridgeBase]);
+  const effectiveBridge = useMemo(() => (bridgeBase || "").trim().replace(/\/$/, ""), [bridgeBase]);
   const effectiveToken = useMemo(() => (bridgeToken || "").trim(), [bridgeToken]);
+  const effectiveApi = useMemo(() => (apiBase || "").trim().replace(/\/$/, ""), [apiBase]);
 
   // 3) URL 파라미터가 있으면 자동 저장 + 자동 이동
   useEffect(() => {
-    if (!qsBridge && !qsToken) return;
+    if (!qsBridge && !qsToken && !qsApi) return;
 
-    // 저장
-    setBridgeConfig({ bridgeBase: qsBridge || effectiveBase, bridgeToken: qsToken || effectiveToken });
+    const saveBridge = (qsBridge || effectiveBridge || "").trim().replace(/\/$/, "");
+    const saveToken = (qsToken || effectiveToken || "").trim();
+    const saveApi = (qsApi || effectiveApi || "").trim().replace(/\/$/, "");
 
-    // 토큰이 주소창에 남지 않게 query 없는 URL로 바꿔치기 후 이동
-    router.replace(qsNext);
+    // ✅ 저장 (constants.js가 sanitize + default 처리)
+    setBridgeConfig({
+      bridgeBase: saveBridge,
+      bridgeToken: saveToken,
+      apiBase: saveApi, // ✅ NEW
+    });
+
+    // ✅ 토큰이 주소창에 남지 않게, 우선 URL을 /connect로 바꾸고(히스토리) 곧바로 이동
+    try {
+      window.history.replaceState({}, "", "/connect");
+    } catch {}
+
+    // ✅ 하드 네비게이션(레이스 제거)
+    setTimeout(() => {
+      window.location.replace(qsNext);
+    }, 50);
+
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [qsBridge, qsToken, qsNext]);
+  }, [qsBridge, qsToken, qsApi, qsNext]);
 
   async function onTestHealth() {
     setMsg("Testing /health ...");
     setRaw(null);
     try {
-      const j = await bridgeHealth({ bridgeBase: effectiveBase, bridgeToken: effectiveToken, timeoutMs: 2000 });
+      const j = await bridgeHealth({ bridgeBase: effectiveBridge, bridgeToken: effectiveToken, timeoutMs: 2000 });
       setRaw(j);
       if (j && j.ok) setMsg("✅ Bridge OK (health)");
       else setMsg(`❌ Bridge FAIL (health): ${j?.msg || "unknown"}`);
@@ -69,7 +97,7 @@ function ConnectInner() {
     setMsg("Testing /state ...");
     setRaw(null);
     try {
-      const j = await bridgeState({ bridgeBase: effectiveBase, bridgeToken: effectiveToken, timeoutMs: 2000 });
+      const j = await bridgeState({ bridgeBase: effectiveBridge, bridgeToken: effectiveToken, timeoutMs: 2000 });
       setRaw(j);
       if (j && j.ok) setMsg("✅ Bridge OK (state)");
       else setMsg(`❌ Bridge FAIL (state): ${j?.msg || "unknown"}`);
@@ -79,13 +107,14 @@ function ConnectInner() {
   }
 
   function onSaveOnly() {
-    setBridgeConfig({ bridgeBase: effectiveBase, bridgeToken: effectiveToken });
-    setMsg("✅ Saved to localStorage. 이제 Recommend에서 401 없이 붙어야 함.");
+    setBridgeConfig({ bridgeBase: effectiveBridge, bridgeToken: effectiveToken, apiBase: effectiveApi });
+    setMsg("✅ Saved to localStorage. 이제 Recommend에서 bridge/api 모두 같은 설정으로 읽힙니다.");
     setRaw(null);
   }
 
   function onSaveAndGo() {
-    setBridgeConfig({ bridgeBase: effectiveBase, bridgeToken: effectiveToken });
+    setBridgeConfig({ bridgeBase: effectiveBridge, bridgeToken: effectiveToken, apiBase: effectiveApi });
+    // 수동 버튼은 SPA 이동 OK
     router.push("/recommend");
   }
 
@@ -93,6 +122,7 @@ function ConnectInner() {
     clearBridgeConfig();
     setBridgeBase("http://127.0.0.1:12145");
     setBridgeToken("");
+    setApiBase("http://127.0.0.1:8000");
     setMsg("🧹 Cleared local config.");
     setRaw(null);
   }
@@ -105,7 +135,11 @@ function ConnectInner() {
         <b style={{ color: "var(--text)" }}>localhost 브릿지</b>에서 상태만 읽습니다.
         <br />
         <span style={{ opacity: 0.9 }}>
-          TIP: <b style={{ color: "var(--text)" }}>/connect?bridge=...&token=...&next=/recommend</b> 로 들어오면 자동 저장 후 자동 이동합니다.
+          TIP:{" "}
+          <b style={{ color: "var(--text)" }}>
+            /connect?bridge=...&token=...&api=...&next=/recommend
+          </b>{" "}
+          로 들어오면 자동 저장 후 자동 이동합니다.
         </span>
       </p>
 
@@ -137,6 +171,21 @@ function ConnectInner() {
             />
           </label>
 
+          <label>
+            <div className="p" style={{ fontWeight: 900, marginBottom: 6 }}>
+              API Base (LOPA API)
+            </div>
+            <input
+              className="input"
+              value={apiBase}
+              onChange={(e) => setApiBase(e.target.value)}
+              placeholder="http://127.0.0.1:8000"
+            />
+            <div className="p" style={{ marginTop: 6, fontSize: 12, opacity: 0.9 }}>
+              배포 환경에서 Render가 슬립이면 첫 /meta가 실패할 수 있어서, 로컬 API를 쓰려면 여기 값을 127.0.0.1로 저장하세요.
+            </div>
+          </label>
+
           <div className="row" style={{ marginTop: 4 }}>
             <button className="btn" onClick={onSaveOnly}>
               Save (local)
@@ -162,7 +211,7 @@ function ConnectInner() {
               현재 적용 값(입력칸 기준):
             </div>
             <div className="pre">
-              {`bridgeBase: ${effectiveBase || "(empty)"}\nbridgeToken: ${effectiveToken ? "(set)" : "(empty)"}`}
+              {`bridgeBase: ${effectiveBridge || "(empty)"}\nbridgeToken: ${effectiveToken ? "(set)" : "(empty)"}\napiBase: ${effectiveApi || "(empty)"}`}
             </div>
           </div>
 
