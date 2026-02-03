@@ -46,9 +46,16 @@ export default function HomePage() {
                 (주의: URL에 token이 노출될 수 있으니, 개인 PC에서만 사용 권장)
               </span>
             </p>
+
+            {/* ✅ api= 추가: Connect가 apiBase까지 저장 가능 */}
             <div className="pre" style={{ marginTop: 10 }}>
-              {`http://localhost:3000/autoconnect?bridge=http://127.0.0.1:12145&token=YOUR_TOKEN&next=/recommend`}
+              {`http://localhost:3000/autoconnect?bridge=http://127.0.0.1:12145&token=YOUR_TOKEN&api=http://127.0.0.1:8000&next=/recommend`}
             </div>
+
+            <p className="p" style={{ marginTop: 10, fontSize: 12, opacity: 0.9 }}>
+              * 배포(https) 환경에서는 브릿지(http://127.0.0.1)가 브라우저 보안 정책으로 차단될 수 있습니다.
+              로컬 개발 모드(http://localhost:3000)에서 사용하는 것을 권장합니다.
+            </p>
           </div>
         </div>
 

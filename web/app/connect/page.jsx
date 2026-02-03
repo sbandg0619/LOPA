@@ -27,6 +27,9 @@ function ConnectInner() {
   const [msg, setMsg] = useState("");
   const [raw, setRaw] = useState(null);
 
+  // ✅ token 보이기/숨기기
+  const [showToken, setShowToken] = useState(false);
+
   // URL params (있으면 자동 저장+이동)
   const qsBridge = useMemo(() => (sp.get("bridge") || "").trim(), [sp]);
   const qsToken = useMemo(() => (sp.get("token") || "").trim(), [sp]);
@@ -127,21 +130,34 @@ function ConnectInner() {
     setRaw(null);
   }
 
+  const standardAutoUrl = useMemo(() => {
+    return `http://localhost:3000/autoconnect?bridge=http://127.0.0.1:12145&token=YOUR_TOKEN&api=http://127.0.0.1:8000&next=/recommend`;
+  }, []);
+
   return (
     <div className="card">
       <div className="h1">Connect</div>
+
       <p className="p">
         브릿지는 <b style={{ color: "var(--text)" }}>사용자 PC</b>에서 LCU를 읽고, 웹은{" "}
         <b style={{ color: "var(--text)" }}>localhost 브릿지</b>에서 상태만 읽습니다.
         <br />
-        <span style={{ opacity: 0.9 }}>
+        <span style={{ opacity: 0.92 }}>
           TIP:{" "}
           <b style={{ color: "var(--text)" }}>
-            /connect?bridge=...&token=...&api=...&next=/recommend
+            /autoconnect?bridge=...&token=...&api=...&next=/recommend
           </b>{" "}
           로 들어오면 자동 저장 후 자동 이동합니다.
         </span>
       </p>
+
+      <div className="card" style={{ marginTop: 12, background: "rgba(255,255,255,0.03)" }}>
+        <div className="h2" style={{ marginBottom: 6 }}>표준 AutoConnect URL</div>
+        <div className="p" style={{ marginTop: 0, opacity: 0.92 }}>
+          Home 페이지와 동일한 표준 형식입니다. (token 노출 가능 → 개인 PC에서만 권장)
+        </div>
+        <div className="pre" style={{ marginTop: 10 }}>{standardAutoUrl}</div>
+      </div>
 
       <div style={{ height: 10 }} />
 
@@ -160,15 +176,32 @@ function ConnectInner() {
           </label>
 
           <label>
-            <div className="p" style={{ fontWeight: 900, marginBottom: 6 }}>
-              Bridge Token
+            <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
+              <div className="p" style={{ fontWeight: 900, marginBottom: 6 }}>
+                Bridge Token
+              </div>
+              <label className="p" style={{ display: "flex", alignItems: "center", gap: 8, margin: 0 }}>
+                <input
+                  type="checkbox"
+                  checked={showToken}
+                  onChange={(e) => setShowToken(e.target.checked)}
+                />
+                token 보기
+              </label>
             </div>
+
             <input
               className="input"
               value={bridgeToken}
               onChange={(e) => setBridgeToken(e.target.value)}
               placeholder="브릿지 콘솔에 출력된 token"
+              type={showToken ? "text" : "password"}
+              autoComplete="off"
+              spellCheck={false}
             />
+            <div className="p" style={{ marginTop: 6, fontSize: 12, opacity: 0.9 }}>
+              401이 뜨면 토큰이 저장/일치하지 않는 경우가 대부분입니다.
+            </div>
           </label>
 
           <label>
@@ -180,6 +213,7 @@ function ConnectInner() {
               value={apiBase}
               onChange={(e) => setApiBase(e.target.value)}
               placeholder="http://127.0.0.1:8000"
+              spellCheck={false}
             />
             <div className="p" style={{ marginTop: 6, fontSize: 12, opacity: 0.9 }}>
               배포 환경에서 Render가 슬립이면 첫 /meta가 실패할 수 있어서, 로컬 API를 쓰려면 여기 값을 127.0.0.1로 저장하세요.

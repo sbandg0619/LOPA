@@ -1,6 +1,21 @@
+// web/app/api/legal/route.js
 import { NextResponse } from "next/server";
 import fs from "fs/promises";
 import path from "path";
+
+// ✅ 서버에서도 slug 화이트리스트 강제 (클라와 동일하게)
+const ALLOWED = new Set([
+  "terms_ko",
+  "privacy_ko",
+  "disclaimer_ko",
+  "deletion_ko",
+  "contact_ko",
+  "terms_en",
+  "privacy_en",
+  "disclaimer_en",
+  "deletion_en",
+  "contact_en",
+]);
 
 function isSafeName(name) {
   // path traversal 방지: terms_ko 같은 형태만 허용
@@ -23,8 +38,10 @@ export async function GET(req) {
   const { searchParams } = new URL(req.url);
   const name = (searchParams.get("name") || "").trim();
 
-  if (!isSafeName(name)) {
-    return NextResponse.json({ ok: false, error: "invalid name" }, { status: 400 });
+  // ✅ name 검증 + 화이트리스트
+  if (!name || !isSafeName(name) || !ALLOWED.has(name)) {
+    // not found로 통일(불필요한 힌트/정보 노출 줄임)
+    return NextResponse.json({ ok: false, error: "not found" }, { status: 404 });
   }
 
   const filename = `${name}.md`;
@@ -43,10 +60,8 @@ export async function GET(req) {
 
   const r = await readFirstExisting(candidates);
   if (!r.ok) {
-    return NextResponse.json(
-      { ok: false, error: "not found", tried: candidates },
-      { status: 404 }
-    );
+    // ✅ 내부 경로(tried) 노출 금지
+    return NextResponse.json({ ok: false, error: "not found" }, { status: 404 });
   }
 
   return new NextResponse(r.text, {
