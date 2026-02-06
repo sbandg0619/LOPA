@@ -7,12 +7,26 @@ export const API_BASE =
 
 const DEFAULT_TIMEOUT_MS = 15000;
 
+function isBrowser() {
+  return typeof window !== "undefined";
+}
+
+function isLocalhostHostname(host) {
+  const h = String(host || "").trim().toLowerCase();
+  return h === "localhost" || h === "127.0.0.1";
+}
+
+function isLocalApiBase(base) {
+  const b = String(base || "").trim().toLowerCase();
+  return b.startsWith("http://127.0.0.1") || b.startsWith("http://localhost");
+}
+
 // ✅ 런타임(브라우저)에서 저장된 apiBase가 있으면 그걸 우선 사용
-// - connect에서 setBridgeConfig({ apiBase })로 저장해두면 여기서 읽어서 적용됨
-// - getBridgeConfig는 constants.js에 이미 존재(Recommend에서 쓰고 있음)
+// - 단, "배포 환경"에서는 local api(127.0.0.1/localhost)면 자동 무시 (브릿지 선택사항 보장)
 function getRuntimeApiBase() {
   try {
-    if (typeof window === "undefined") return "";
+    if (!isBrowser()) return "";
+
     // eslint-disable-next-line global-require
     const { getBridgeConfig } = require("./constants");
     if (typeof getBridgeConfig !== "function") return "";
@@ -22,10 +36,18 @@ function getRuntimeApiBase() {
     if (!raw) return "";
 
     // 너무 공격적으로 검증하지 말고 http(s)만 체크
-    if (raw.startsWith("http://") || raw.startsWith("https://")) {
-      return raw.replace(/\/$/, "");
+    if (!(raw.startsWith("http://") || raw.startsWith("https://"))) return "";
+
+    const cleaned = raw.replace(/\/$/, "");
+
+    // ✅ 중요: 배포 도메인에서는 "로컬 API" 저장값을 무시
+    const host = String(window.location.hostname || "");
+    const onLocalhost = isLocalhostHostname(host);
+    if (!onLocalhost && isLocalApiBase(cleaned)) {
+      return "";
     }
-    return "";
+
+    return cleaned;
   } catch {
     return "";
   }
@@ -109,7 +131,7 @@ async function fetchJsonOrText(url, opts = {}) {
     const err = new Error(`${baseMsg} — ${url}`);
     err.url = url;
     err.cause = e;
-    err.status = e?.status; // 혹시 위에서 만든 err가 들어오는 케이스
+    err.status = e?.status;
     throw err;
   } finally {
     clearTimeout(timer);
@@ -138,7 +160,7 @@ async function fetchWithRetry(url, opts = {}, { retries = 2, backoffMs = 800 } =
         (Number.isFinite(status) && status >= 500);
 
       if (!retryable || i === retries) break;
-      await sleep(backoffMs * (i + 1)); // 0.8s, 1.6s ...
+      await sleep(backoffMs * (i + 1));
     }
   }
 
@@ -164,8 +186,6 @@ export async function apiMeta(dbPath, apiBase) {
   const qs = new URLSearchParams();
   if (dbPath) qs.set("db_path", String(dbPath));
 
-  // ✅ 첫 진입에서만 /meta가 실패하는 경우가 많아서 (슬립/콜드스타트)
-  // 짧게 1~2회 재시도로 안정화
   return await fetchWithRetry(`${base}/meta?${qs.toString()}`, { method: "GET" }, { retries: 2, backoffMs: 800 });
 }
 

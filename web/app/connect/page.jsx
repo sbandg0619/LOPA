@@ -1,15 +1,6 @@
 "use client";
 
 // web/app/connect/page.jsx
-// 목적:
-// 1) 여기서 저장한 bridge/token/api가 Recommend에서 동일하게 읽히게 함.
-// 2) /connect?bridge=...&token=...&api=...&next=/recommend 로 들어오면
-//    자동으로 저장 후 next로 이동(=자동이동).
-//
-// ✅ Fix:
-// - auto-save 직후 router.replace(SPA)로 이동하면 Recommend의 초기 fetch 타이밍 레이스가 생길 수 있음
-// - 그래서 auto 이동은 window.location.replace(하드 네비게이션)로 변경
-// - api= 파라미터도 같이 저장해서 Render(슬립) 대신 로컬 API를 안정적으로 사용 가능
 
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -27,24 +18,22 @@ function ConnectInner() {
   const [msg, setMsg] = useState("");
   const [raw, setRaw] = useState(null);
 
-  // ✅ token 보이기/숨기기
   const [showToken, setShowToken] = useState(false);
 
-  // URL params (있으면 자동 저장+이동)
   const qsBridge = useMemo(() => (sp.get("bridge") || "").trim(), [sp]);
   const qsToken = useMemo(() => (sp.get("token") || "").trim(), [sp]);
   const qsApi = useMemo(() => (sp.get("api") || "").trim(), [sp]);
   const qsNext = useMemo(() => (sp.get("next") || "/recommend").trim() || "/recommend", [sp]);
 
-  // 1) 최초: localStorage 값 로드
+  // 1) 최초: localStorage 값 로드 (constants가 env 기본값까지 처리)
   useEffect(() => {
     const cfg = getBridgeConfig();
     setBridgeBase(cfg?.bridgeBase || "http://127.0.0.1:12145");
     setBridgeToken(cfg?.bridgeToken || "");
-    setApiBase(cfg?.apiBase || "http://127.0.0.1:8000");
+    setApiBase(cfg?.apiBase || ""); // ✅ 하드코딩 제거
   }, []);
 
-  // 2) URL 파라미터가 있으면 입력칸에도 반영 (보이는 값)
+  // 2) URL 파라미터가 있으면 입력칸에도 반영
   useEffect(() => {
     if (qsBridge) setBridgeBase(qsBridge);
     if (qsToken) setBridgeToken(qsToken);
@@ -63,19 +52,16 @@ function ConnectInner() {
     const saveToken = (qsToken || effectiveToken || "").trim();
     const saveApi = (qsApi || effectiveApi || "").trim().replace(/\/$/, "");
 
-    // ✅ 저장 (constants.js가 sanitize + default 처리)
     setBridgeConfig({
       bridgeBase: saveBridge,
       bridgeToken: saveToken,
       apiBase: saveApi, // ✅ NEW
     });
 
-    // ✅ 토큰이 주소창에 남지 않게, 우선 URL을 /connect로 바꾸고(히스토리) 곧바로 이동
     try {
       window.history.replaceState({}, "", "/connect");
     } catch {}
 
-    // ✅ 하드 네비게이션(레이스 제거)
     setTimeout(() => {
       window.location.replace(qsNext);
     }, 50);
@@ -117,15 +103,16 @@ function ConnectInner() {
 
   function onSaveAndGo() {
     setBridgeConfig({ bridgeBase: effectiveBridge, bridgeToken: effectiveToken, apiBase: effectiveApi });
-    // 수동 버튼은 SPA 이동 OK
     router.push("/recommend");
   }
 
   function onClear() {
     clearBridgeConfig();
-    setBridgeBase("http://127.0.0.1:12145");
-    setBridgeToken("");
-    setApiBase("http://127.0.0.1:8000");
+    // clear 후에는 constants 기본값(env 우선) 다시 로드
+    const cfg = getBridgeConfig();
+    setBridgeBase(cfg?.bridgeBase || "http://127.0.0.1:12145");
+    setBridgeToken(cfg?.bridgeToken || "");
+    setApiBase(cfg?.apiBase || "");
     setMsg("🧹 Cleared local config.");
     setRaw(null);
   }
@@ -212,11 +199,11 @@ function ConnectInner() {
               className="input"
               value={apiBase}
               onChange={(e) => setApiBase(e.target.value)}
-              placeholder="http://127.0.0.1:8000"
+              placeholder="(env or http://127.0.0.1:8000)"
               spellCheck={false}
             />
             <div className="p" style={{ marginTop: 6, fontSize: 12, opacity: 0.9 }}>
-              배포 환경에서 Render가 슬립이면 첫 /meta가 실패할 수 있어서, 로컬 API를 쓰려면 여기 값을 127.0.0.1로 저장하세요.
+              배포 웹에서는 기본이 Render(API)로 가는 게 정상입니다. 로컬 API를 쓰고 싶을 때만 127.0.0.1로 저장하세요.
             </div>
           </label>
 
