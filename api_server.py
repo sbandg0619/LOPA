@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -127,25 +127,40 @@ def _variant_for_profile() -> str:
     return "public" if PROFILE == "public" else "personal"
 
 
-def _resolve_db_path_for_request(db_path: str, patch: str) -> str:
+def _is_explicit_db_path(user_db_path: str) -> bool:
+    """
+    ✅ 유저가 request에 '명시적으로' db_path를 준 케이스인지 판정
+    - 기본값(DEFAULT_DB)이 그대로 넘어온 경우는 명시로 보지 않음
+    - 빈 문자열도 명시로 보지 않음
+    """
+    p = (user_db_path or "").strip()
+    if not p:
+        return False
+    if p == DEFAULT_DB:
+        return False
+    return True
+
+
+def _resolve_db_path_for_request(user_db_path: str, patch: str) -> str:
     """
     규칙:
-    - patch == "ALL" -> 사용자가 준 db_path 또는 DEFAULT_DB(기존 단일 DB 호환)
-    - patch != "ALL" -> db/lol_graph_{variant}_{patch}.db 를 사용(없으면 자동 다운로드 시도)
+    - patch == "ALL":
+        - 유저가 db_path를 줬으면 그걸(존재 여부는 _ensure에서 처리)
+        - 아니면 DEFAULT_DB
+    - patch != "ALL":
+        - 유저가 db_path를 "명시적으로" 줬으면 그걸 사용(고급 사용자/디버그용)
+        - 아니면 db_dir/lol_graph_{variant}_{patch}.db 를 사용 (없으면 자동 다운로드 대상)
     """
     patch = normalize_patch(patch)
 
-    # 사용자가 db_path를 명시적으로 줬고 파일이 존재하면 그걸 우선 사용
-    if db_path and os.path.exists(db_path):
-        return db_path
-
-    # patch ALL이면 기존 단일 DB로 유지(호환)
     if patch == "ALL":
-        if db_path:
-            return db_path
-        return DEFAULT_DB
+        p = (user_db_path or "").strip()
+        return p if p else DEFAULT_DB
 
-    # patch DB 분리 모드
+    # patch 분리 모드
+    if _is_explicit_db_path(user_db_path):
+        return user_db_path
+
     variant = _variant_for_profile()
     patch_db = os.path.join(DB_DIR, f"lol_graph_{variant}_{patch}.db")
     return patch_db
@@ -154,9 +169,14 @@ def _resolve_db_path_for_request(db_path: str, patch: str) -> str:
 def _ensure_patch_db_if_needed(db_path: str, patch: str) -> str:
     patch = normalize_patch(patch)
 
+    # DB_DIR 보장 (Render의 /tmp 같은 경로 포함)
+    try:
+        os.makedirs(DB_DIR, exist_ok=True)
+    except Exception:
+        pass
+
     # ALL은 자동다운로드 대상 아님(단일 DB 호환 유지)
     if patch == "ALL":
-        # 단, DEFAULT_DB가 없으면 에러
         if not os.path.exists(db_path):
             raise FileNotFoundError(f"DB not found: {db_path} (patch=ALL)")
         return db_path
@@ -250,6 +270,7 @@ def meta(db_path: str = DEFAULT_DB, patch: str = "ALL"):
             patches = get_available_patches(con)
         finally:
             con.close()
+
         return {
             "ok": True,
             "latest_patch": latest,
@@ -331,7 +352,6 @@ def recommend(req: RecommendRequest):
                 "use_champ_pool": req.use_champ_pool,
                 "reason": meta2.get("reason", "ok"),
 
-                # UI용
                 "enemy_role_guess": meta2.get("enemy_role_guess", {}) or {},
                 "enemy_role_guess_method": meta2.get("enemy_role_guess_method", "unknown"),
                 "enemy_role_guess_detail": meta2.get("enemy_role_guess_detail", {}) or {},
