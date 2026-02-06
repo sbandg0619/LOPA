@@ -4,8 +4,16 @@
 // + ✅ API base(로컬/서버)도 함께 저장해서 Recommend/API 호출이 같은 값을 보게 함
 
 const KEY = "lopa_bridge_config_v1";
-const DEFAULT_BRIDGE_BASE = "http://127.0.0.1:12145";
-const DEFAULT_API_BASE = "http://127.0.0.1:8000";
+const DEFAULT_KEY_BRIDGE_BASE = "http://127.0.0.1:12145";
+
+// ✅ 배포 기본 API는 Vercel env(NEXT_PUBLIC_API_BASE)가 있으면 그걸 우선
+// (없으면 로컬 기본값)
+const DEFAULT_KEY_API_BASE =
+  (typeof process !== "undefined" &&
+    process.env &&
+    process.env.NEXT_PUBLIC_API_BASE &&
+    String(process.env.NEXT_PUBLIC_API_BASE).trim()) ||
+  "http://127.0.0.1:8000";
 
 function canUseStorage() {
   return typeof window !== "undefined" && typeof window.localStorage !== "undefined";
@@ -31,11 +39,11 @@ function sanitizeUrlBase(x, fallback) {
 }
 
 function sanitizeBase(x) {
-  return sanitizeUrlBase(x, DEFAULT_BRIDGE_BASE);
+  return sanitizeUrlBase(x, DEFAULT_KEY_BRIDGE_BASE);
 }
 
 function sanitizeApiBase(x) {
-  return sanitizeUrlBase(x, DEFAULT_API_BASE);
+  return sanitizeUrlBase(x, DEFAULT_KEY_API_BASE);
 }
 
 function sanitizeToken(x) {
@@ -43,60 +51,58 @@ function sanitizeToken(x) {
 }
 
 export function getBridgeConfig() {
-  if (!canUseStorage()) return { bridgeBase: DEFAULT_BRIDGE_BASE, bridgeToken: "", apiBase: DEFAULT_API_BASE };
+  if (!canUseStorage()) {
+    return { bridgeBase: DEFAULT_KEY_BRIDGE_BASE, bridgeToken: "", apiBase: DEFAULT_KEY_API_BASE };
+  }
 
   try {
     const raw = window.localStorage.getItem(KEY);
-    if (!raw) return { bridgeBase: DEFAULT_BRIDGE_BASE, bridgeToken: "", apiBase: DEFAULT_API_BASE };
+    if (!raw) {
+      return { bridgeBase: DEFAULT_KEY_BRIDGE_BASE, bridgeToken: "", apiBase: DEFAULT_KEY_API_BASE };
+    }
 
     const j = JSON.parse(raw);
 
     // 이전 버전 호환(bridgeBase/base, bridgeToken/token)
-    const bridgeBase = sanitizeBase(j?.bridgeBase || j?.base || DEFAULT_BRIDGE_BASE);
+    const bridgeBase = sanitizeBase(j?.bridgeBase || j?.base || DEFAULT_KEY_BRIDGE_BASE);
     const bridgeToken = sanitizeToken(j?.bridgeToken || j?.token || "");
 
-    // ✅ NEW: apiBase 저장/호환
-    // - apiBase / api_base / api / API_BASE 등 여러 이름 흡수
-    const apiBase = sanitizeApiBase(
-      j?.apiBase || j?.api_base || j?.api || j?.API_BASE || DEFAULT_API_BASE
-    );
+    // ✅ apiBase 저장/호환
+    const apiBase = sanitizeApiBase(j?.apiBase || j?.api_base || j?.api || j?.API_BASE || DEFAULT_KEY_API_BASE);
 
     return { bridgeBase, bridgeToken, apiBase };
   } catch {
-    return { bridgeBase: DEFAULT_BRIDGE_BASE, bridgeToken: "", apiBase: DEFAULT_API_BASE };
+    return { bridgeBase: DEFAULT_KEY_BRIDGE_BASE, bridgeToken: "", apiBase: DEFAULT_KEY_API_BASE };
   }
 }
 
 export function getBridgeBase() {
-  return getBridgeConfig().bridgeBase || DEFAULT_BRIDGE_BASE;
+  return getBridgeConfig().bridgeBase || DEFAULT_KEY_BRIDGE_BASE;
 }
 
 export function getBridgeToken() {
   return getBridgeConfig().bridgeToken || "";
 }
 
-// ✅ NEW: 현재 선택된 API base를 꺼내는 헬퍼
 export function getApiBase() {
-  return getBridgeConfig().apiBase || DEFAULT_API_BASE;
+  return getBridgeConfig().apiBase || DEFAULT_KEY_API_BASE;
 }
 
-// ✅ setBridgeConfig: bridge + api를 한 번에 저장
-// - 기존 호출은 bridgeBase/bridgeToken만 넘겨도 동작
 export function setBridgeConfig({ bridgeBase, bridgeToken, apiBase }) {
   if (!canUseStorage()) return;
 
-  const base = sanitizeBase(bridgeBase || DEFAULT_BRIDGE_BASE);
+  const base = sanitizeBase(bridgeBase || DEFAULT_KEY_BRIDGE_BASE);
   const token = sanitizeToken(bridgeToken || "");
 
   // apiBase가 안 오면 "기존 저장값"을 유지 (없으면 기본값)
-  let api = DEFAULT_API_BASE;
+  let api = DEFAULT_KEY_API_BASE;
   try {
     const prev = getBridgeConfig();
-    api = prev?.apiBase || DEFAULT_API_BASE;
+    api = prev?.apiBase || DEFAULT_KEY_API_BASE;
   } catch {}
 
   if (typeof apiBase !== "undefined") {
-    api = sanitizeApiBase(apiBase || DEFAULT_API_BASE);
+    api = sanitizeApiBase(apiBase || DEFAULT_KEY_API_BASE);
   }
 
   const payload = {

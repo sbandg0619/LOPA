@@ -181,7 +181,6 @@ def _wait_api_meta_ready(api_url: str, timeout_sec: float = 25.0, interval: floa
                 j = r.json()
                 latest = str(j.get("latest_patch") or "").strip()
                 ok = bool(j.get("ok"))
-                # "unknown" 또는 빈 문자열이면 아직 준비 덜 됐다고 판단
                 if ok and latest and latest.lower() != "unknown":
                     return True, f"OK latest_patch={latest}"
                 last = f"meta not ready (ok={ok}, latest_patch={latest or 'empty'})"
@@ -199,14 +198,6 @@ def _start_api_if_needed(here: Path) -> dict:
     """
     브릿지가 API(uvicorn)를 같이 켜는 기능.
     기본 ON. 끄려면: LOPA_API_AUTO_START=0
-
-    설정:
-      LOPA_API_HOST=127.0.0.1
-      LOPA_API_PORT=8000
-      LOPA_API_APP=api_server:app
-      LOPA_API_HEALTH_PATH=/health
-      LOPA_API_LOG_FILE=lopa_api.log
-      LOPA_API_WARMUP_META=1  (기본 1)
     """
     auto = (os.getenv("LOPA_API_AUTO_START") or "1").strip().lower()
     if auto in ("0", "false", "no", "off"):
@@ -232,7 +223,6 @@ def _start_api_if_needed(here: Path) -> dict:
     api_url = f"http://{host}:{port}"
     health_url = api_url + health_path
 
-    # 이미 떠 있으면 스킵 + (선택) meta 워밍업
     if _port_is_listening(host, port):
         ok, msg = _wait_http_ok(health_url, timeout_sec=3.0, interval=0.3)
         meta_ok = False
@@ -249,10 +239,8 @@ def _start_api_if_needed(here: Path) -> dict:
             "meta_ready": meta_ok,
         }
 
-    # 어떤 파이썬으로 uvicorn 실행할지:
     py = (os.getenv("PY") or "").strip() or sys.executable
 
-    # 로그 파일
     log_file = (os.getenv("LOPA_API_LOG_FILE") or "lopa_api.log").strip()
     log_path = here / log_file
     cmd = [py, "-m", "uvicorn", app, "--host", host, "--port", str(port)]
@@ -310,7 +298,6 @@ def _start_api_if_needed(here: Path) -> dict:
     meta_ok = False
     meta_msg = ""
     if warmup_meta and ok:
-        # 핵심: health OK 이후 /meta가 정상 latest_patch를 줄 때까지 워밍업
         meta_ok, meta_msg = _wait_api_meta_ready(api_url, timeout_sec=25.0, interval=0.6)
 
     return {
@@ -386,8 +373,86 @@ class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
 
 
+def _proxy_html(bridge_base: str, token: str) -> str:
+    """
+    https(배포) 페이지에서 http(127.0.0.1) fetch가 막히는 문제 해결용:
+    - 이 페이지는 http://127.0.0.1:12145/proxy 로 열림 (same-origin http)
+    - opener(https)와 postMessage로 통신하면서 /health,/state를 대신 fetch해줌
+    """
+    # token은 URL에 포함될 수 있으니, 여기서는 page 자체에 token을 박아둠(로컬 only)
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>LOPA Bridge Proxy</title>
+</head>
+<body>
+  <pre id="log" style="white-space:pre-wrap;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;"></pre>
+<script>
+(function() {{
+  const TOKEN = {json.dumps(token)};
+  const logEl = document.getElementById('log');
+  function log(x) {{
+    try {{ logEl.textContent += (String(x) + "\\n"); }} catch(e) {{}}
+  }}
+
+  // opener가 없으면 그냥 대기
+  if (!window.opener) {{
+    log("No opener. This page is meant to be opened by the LOPA web app.");
+  }} else {{
+    log("Proxy ready. Waiting for requests from opener...");
+  }}
+
+  async function doFetch(path) {{
+    const url = "{bridge_base}".replace(/\\/$/, "") + "/" + String(path||"").replace(/^\\//,"");
+    const r = await fetch(url, {{
+      method: "GET",
+      headers: TOKEN ? {{ "X-LOPA-TOKEN": TOKEN }} : {{}},
+      cache: "no-store",
+    }});
+    const txt = await r.text();
+    let j = null;
+    try {{ j = txt ? JSON.parse(txt) : null; }} catch(e) {{ j = {{ _raw: txt }}; }}
+    return {{ ok: r.ok, status: r.status, url, body: j }};
+  }}
+
+  window.addEventListener("message", async (ev) => {{
+    // 보안: origin을 과도하게 제한하지 않되, 최소한 opener에서 온 메시지만 처리
+    if (!window.opener) return;
+
+    const data = ev.data || {{}};
+    if (!data || data.__lopa_bridge_proxy__ !== true) return;
+
+    const id = String(data.id || "");
+    const path = String(data.path || "");
+    if (!id || !path) return;
+
+    try {{
+      const res = await doFetch(path);
+      window.opener.postMessage({{
+        __lopa_bridge_proxy__ : true,
+        id,
+        ok: true,
+        res,
+      }}, "*");
+    }} catch (e) {{
+      window.opener.postMessage({{
+        __lopa_bridge_proxy__ : true,
+        id,
+        ok: false,
+        error: String(e && e.message ? e.message : e),
+      }}, "*");
+    }}
+  }});
+}})();
+</script>
+</body>
+</html>"""
+
+
 class Handler(BaseHTTPRequestHandler):
-    server_version = "LOPABridge/0.6"
+    server_version = "LOPABridge/0.7"
 
     def _send_json(self, code: int, obj: dict):
         data = json.dumps(obj, ensure_ascii=False).encode("utf-8")
@@ -395,6 +460,14 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, X-LOPA-TOKEN")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _send_html(self, code: int, html: str):
+        data = html.encode("utf-8", errors="ignore")
+        self.send_response(code)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Access-Control-Allow-Origin", "*")
         self.end_headers()
         self.wfile.write(data)
 
@@ -422,10 +495,17 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        path = urlparse(self.path).path
+
+        # ✅ mixed content 우회용 proxy 페이지는 토큰 검사 전에 제공(로컬에서만 열리므로)
+        # (proxy 페이지 내부 fetch는 헤더로 토큰을 붙여서 /health,/state를 호출함)
+        if path == "/proxy":
+            bridge_base = getattr(self.server, "bridge_url", "http://127.0.0.1:12145")
+            token = getattr(self.server, "token", "")
+            return self._send_html(200, _proxy_html(bridge_base=bridge_base, token=token))
+
         if not self._token_ok():
             return self._send_json(401, {"ok": False, "error": "invalid token"})
-
-        path = urlparse(self.path).path
 
         if path == "/health":
             ok, msg = self.server.lcu.ping()
@@ -483,7 +563,7 @@ def main():
     here = Path(__file__).resolve().parent
     loaded_envs = _load_env_candidates()
 
-    # 0) API 먼저 자동 실행 + /meta 워밍업(최신 패치 unknown 방지)
+    # 0) API 먼저 자동 실행 + /meta 워밍업
     api_info = _start_api_if_needed(here)
 
     # 1) lockfile 찾기
@@ -520,8 +600,8 @@ def main():
     httpd.api_info = api_info
 
     bridge_url = f"http://{host}:{port}"
+    httpd.bridge_url = bridge_url  # ✅ proxy html이 base를 알 수 있게
 
-    # 핵심: API meta 워밍업까지(가능한 만큼) 끝낸 후 connect 오픈
     pair_url = _open_pairing_url(bridge_url=bridge_url, token=token, api_url=api_info.get("url"))
 
     print("==================================================")
@@ -531,6 +611,7 @@ def main():
     print(f"- bind        : {bridge_url}")
     print(f"- health      : {bridge_url}/health?token={token}")
     print(f"- state       : {bridge_url}/state?token={token}")
+    print(f"- proxy       : {bridge_url}/proxy   (for https mixed-content bypass)")
     print(f"- api_health  : {bridge_url}/api_health?token={token}")
     print(f"- token       : {token}")
     print(f"- pair url    : {pair_url}")
@@ -544,11 +625,6 @@ def main():
     else:
         print("- loaded env  : (none)")
     print("==================================================")
-    print("phase 의미:")
-    print(' - "None"       : 대기(정상)')
-    print(' - "Lobby/Matchmaking/ReadyCheck" : 큐 진행')
-    print(' - "ChampSelect": 밴/픽 자동 읽기 가능')
-    print(' - "InProgress" : 게임 중')
     print()
 
     try:
