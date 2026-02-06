@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,6 +17,8 @@ from recommender import (
     get_latest_patch,
     get_available_patches,
 )
+
+from release_db import ensure_patch_db_from_manifest
 
 ROLES = ["TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY"]
 
@@ -52,6 +54,13 @@ PROFILE = (os.getenv("APP_PROFILE") or "personal").strip().lower()
 DEFAULT_DB_BY_PROFILE = "lol_graph_public.db" if PROFILE == "public" else "lol_graph_personal.db"
 DEFAULT_DB = os.getenv("LOPA_DB_DEFAULT") or DEFAULT_DB_BY_PROFILE
 
+# ✅ 릴리즈 manifest URL (프로필별)
+MANIFEST_PUBLIC = (os.getenv("LOPA_RELEASE_MANIFEST_PUBLIC") or "").strip()
+MANIFEST_PERSONAL = (os.getenv("LOPA_RELEASE_MANIFEST_PERSONAL") or "").strip()
+
+# ✅ DB 저장 폴더
+DB_DIR = (os.getenv("LOPA_DB_DIR") or "db").strip()
+
 
 app = FastAPI(title="LOPA API", version="0.1.0")
 
@@ -62,6 +71,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 # -------------------------
 # Normalizers (API-side)
@@ -106,9 +116,75 @@ def normalize_tier(tier: str) -> str:
     return t
 
 
+def _manifest_for_variant(variant: str) -> str:
+    v = (variant or "").strip().lower()
+    if v == "public":
+        return MANIFEST_PUBLIC
+    return MANIFEST_PERSONAL
+
+
+def _variant_for_profile() -> str:
+    return "public" if PROFILE == "public" else "personal"
+
+
+def _resolve_db_path_for_request(db_path: str, patch: str) -> str:
+    """
+    규칙:
+    - patch == "ALL" -> 사용자가 준 db_path 또는 DEFAULT_DB(기존 단일 DB 호환)
+    - patch != "ALL" -> db/lol_graph_{variant}_{patch}.db 를 사용(없으면 자동 다운로드 시도)
+    """
+    patch = normalize_patch(patch)
+
+    # 사용자가 db_path를 명시적으로 줬고 파일이 존재하면 그걸 우선 사용
+    if db_path and os.path.exists(db_path):
+        return db_path
+
+    # patch ALL이면 기존 단일 DB로 유지(호환)
+    if patch == "ALL":
+        if db_path:
+            return db_path
+        return DEFAULT_DB
+
+    # patch DB 분리 모드
+    variant = _variant_for_profile()
+    patch_db = os.path.join(DB_DIR, f"lol_graph_{variant}_{patch}.db")
+    return patch_db
+
+
+def _ensure_patch_db_if_needed(db_path: str, patch: str) -> str:
+    patch = normalize_patch(patch)
+
+    # ALL은 자동다운로드 대상 아님(단일 DB 호환 유지)
+    if patch == "ALL":
+        # 단, DEFAULT_DB가 없으면 에러
+        if not os.path.exists(db_path):
+            raise FileNotFoundError(f"DB not found: {db_path} (patch=ALL)")
+        return db_path
+
+    # patch DB 파일이 있으면 OK
+    if os.path.exists(db_path):
+        return db_path
+
+    # 없으면 manifest로 다운받아 생성 시도
+    variant = _variant_for_profile()
+    manifest_url = _manifest_for_variant(variant)
+    if not manifest_url:
+        raise FileNotFoundError(
+            f"Patch DB not found: {db_path} and manifest env missing. "
+            f"Set LOPA_RELEASE_MANIFEST_{variant.upper()}=..."
+        )
+
+    out = ensure_patch_db_from_manifest(
+        manifest_url=manifest_url,
+        variant=variant,
+        patch=patch,
+        out_dir=DB_DIR,
+        force=False,
+    )
+    return str(out)
+
+
 def _db_connect(db_path: str) -> sqlite3.Connection:
-    if not db_path:
-        db_path = DEFAULT_DB
     if not os.path.exists(db_path):
         raise FileNotFoundError(f"DB not found: {db_path}")
     return sqlite3.connect(db_path, check_same_thread=False)
@@ -123,9 +199,6 @@ class RecommendRequest(BaseModel):
     tier: str = Field(default="ALL")
     my_role: str = Field(default="MIDDLE")
 
-    # ✅ 후보 모드:
-    # - use_champ_pool=True  -> champ_pool 후보만 추천
-    # - use_champ_pool=False -> "전체 후보"에서 pick_rate 필터로 후보 생성
     use_champ_pool: bool = Field(default=True)
 
     champ_pool: List[int] = Field(default_factory=list)
@@ -133,13 +206,8 @@ class RecommendRequest(BaseModel):
     ally_picks_by_role: Dict[str, List[int]] = Field(default_factory=dict)
     enemy_picks: List[int] = Field(default_factory=list)
 
-    # (호환용) 기존 min_games도 남겨둠
     min_games: int = Field(default=30, ge=1, le=10000)
-
-    # ✅ NEW: pick rate 기준 (0.005 = 0.5%)
     min_pick_rate: float = Field(default=0.005, ge=0.0, le=1.0)
-
-    # ✅ NEW: 전체 후보 생성 시 후보 상한
     max_candidates: int = Field(default=400, ge=10, le=5000)
 
     top_n: int = Field(default=10, ge=1, le=50)
@@ -156,26 +224,54 @@ class RecommendResponse(BaseModel):
 # -------------------------
 @app.get("/health")
 def health():
-    return {"ok": True, "profile": PROFILE, "default_db": DEFAULT_DB}
+    return {
+        "ok": True,
+        "profile": PROFILE,
+        "default_db": DEFAULT_DB,
+        "db_dir": DB_DIR,
+        "manifest_public_set": bool(MANIFEST_PUBLIC),
+        "manifest_personal_set": bool(MANIFEST_PERSONAL),
+    }
 
 
 @app.get("/meta")
-def meta(db_path: str = DEFAULT_DB):
+def meta(db_path: str = DEFAULT_DB, patch: str = "ALL"):
+    """
+    ✅ patch가 ALL이 아니면: 해당 patch DB를 자동으로 받아 만든 뒤 meta 계산
+    """
     try:
-        con = _db_connect(db_path)
+        patch2 = normalize_patch(patch)
+        resolved = _resolve_db_path_for_request(db_path, patch2)
+        resolved = _ensure_patch_db_if_needed(resolved, patch2)
+
+        con = _db_connect(resolved)
         try:
             latest = get_latest_patch(con)
             patches = get_available_patches(con)
         finally:
             con.close()
-        return {"ok": True, "latest_patch": latest, "patches": patches, "db_path": db_path}
+        return {
+            "ok": True,
+            "latest_patch": latest,
+            "patches": patches,
+            "db_path": resolved,
+            "patch_arg": patch2,
+        }
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.get("/env")
 def env_debug():
-    return {"ok": True, "profile": PROFILE, "loaded_envs": _LOADED_ENVS, "default_db": DEFAULT_DB}
+    return {
+        "ok": True,
+        "profile": PROFILE,
+        "loaded_envs": _LOADED_ENVS,
+        "default_db": DEFAULT_DB,
+        "db_dir": DB_DIR,
+        "manifest_public": MANIFEST_PUBLIC,
+        "manifest_personal": MANIFEST_PERSONAL,
+    }
 
 
 @app.post("/recommend", response_model=RecommendResponse)
@@ -201,8 +297,11 @@ def recommend(req: RecommendRequest):
         raise HTTPException(status_code=400, detail="champ_pool is empty (use_champ_pool=true)")
 
     try:
+        resolved = _resolve_db_path_for_request(req.db_path, patch)
+        resolved = _ensure_patch_db_if_needed(resolved, patch)
+
         recs, meta2 = recommend_champions(
-            db_path=req.db_path,
+            db_path=resolved,
             patch=patch,
             tier=tier,
             my_role=my_role,
@@ -221,7 +320,7 @@ def recommend(req: RecommendRequest):
             "ok": True,
             "recs": recs,
             "meta": {
-                "db_path": req.db_path,
+                "db_path": resolved,
                 "patch": patch,
                 "tier": tier,
                 "my_role": my_role,
@@ -232,7 +331,7 @@ def recommend(req: RecommendRequest):
                 "use_champ_pool": req.use_champ_pool,
                 "reason": meta2.get("reason", "ok"),
 
-                # ✅ UI 표시용 (프론트가 기대하는 키들)
+                # UI용
                 "enemy_role_guess": meta2.get("enemy_role_guess", {}) or {},
                 "enemy_role_guess_method": meta2.get("enemy_role_guess_method", "unknown"),
                 "enemy_role_guess_detail": meta2.get("enemy_role_guess_detail", {}) or {},

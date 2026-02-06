@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "generated_at": 1770388537,
+  "variant": "public",
+  "files": {
+    "16.2": {
+      "patch": "16.2",
+      "variant": "public",
+      "filename": "lol_graph_public_16.2.db.gz",
+      "sha256": "2bf0baae8c5bc48cf9389777da91171bbead326f183a6d12657b4517fc77862b",
+      "bytes": 932
+    }
+  }
+}
