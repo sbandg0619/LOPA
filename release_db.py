@@ -1,223 +1,184 @@
 # release_db.py
 from __future__ import annotations
 
-import os
-import io
-import json
-import time
-import shutil
 import hashlib
-import gzip
-from dataclasses import dataclass
+import json
+import os
+import shutil
+import tempfile
+import time
+import urllib.request
 from pathlib import Path
 from typing import Any, Dict, Optional
-from urllib.parse import urlparse
-from urllib.request import Request, urlopen
 
 
-# -------------------------
-# Security defaults
-# -------------------------
-DEFAULT_ALLOWED_HOSTS = {
-    "github.com",
-    "raw.githubusercontent.com",
-    "objects.githubusercontent.com",
-}
-
-DEFAULT_MAX_BYTES = int(os.getenv("LOPA_DB_MAX_BYTES") or (3 * 1024 * 1024 * 1024))  # 3GB
-DEFAULT_TIMEOUT_SEC = float(os.getenv("LOPA_DB_HTTP_TIMEOUT_SEC") or "30")
-
-
-@dataclass
-class ManifestInfo:
-    variant: str
-    patch: str
-    created_at: Optional[str]
-    db_gz_url: str
-    db_gz_sha256: str
+def _http_get_bytes(url: str, timeout: int = 60) -> bytes:
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "LOPA-DB-Downloader/1.0",
+            "Accept": "application/json,*/*",
+        },
+        method="GET",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read()
 
 
-def _now_ts() -> int:
-    return int(time.time())
-
-
-def _ensure_dir(p: str | Path) -> Path:
-    d = Path(p)
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def _is_https(url: str) -> bool:
-    try:
-        return urlparse(url).scheme.lower() == "https"
-    except Exception:
-        return False
-
-
-def _host(url: str) -> str:
-    try:
-        return (urlparse(url).hostname or "").lower()
-    except Exception:
-        return ""
-
-
-def _check_url_security(url: str, allowed_hosts: set[str]) -> None:
-    if not url or not isinstance(url, str):
-        raise ValueError("URL is empty")
-    if not _is_https(url):
-        raise ValueError(f"Only HTTPS is allowed: {url}")
-    h = _host(url)
-    if h not in allowed_hosts:
-        raise ValueError(f"Host not allowed: {h} (url={url})")
-
-
-def _http_get_bytes(url: str, timeout_sec: float = DEFAULT_TIMEOUT_SEC, max_bytes: int = DEFAULT_MAX_BYTES) -> bytes:
-    req = Request(url, headers={"User-Agent": "LOPA/1.0"})
-    with urlopen(req, timeout=timeout_sec) as r:
-        # best-effort content length guard
-        cl = r.headers.get("Content-Length")
-        if cl:
-            try:
-                n = int(cl)
-                if n > max_bytes:
-                    raise ValueError(f"File too large: {n} bytes > max_bytes={max_bytes}")
-            except Exception:
-                pass
-
-        buf = io.BytesIO()
-        chunk = r.read(1024 * 1024)
-        total = 0
-        while chunk:
-            total += len(chunk)
-            if total > max_bytes:
-                raise ValueError(f"File too large while downloading: > max_bytes={max_bytes}")
-            buf.write(chunk)
-            chunk = r.read(1024 * 1024)
-        return buf.getvalue()
-
-
-def _sha256_hex(data: bytes) -> str:
+def _sha256_file(path: Path) -> str:
     h = hashlib.sha256()
-    h.update(data)
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
     return h.hexdigest()
 
 
-def _read_manifest(manifest_url: str, allowed_hosts: set[str]) -> Dict[str, Any]:
-    _check_url_security(manifest_url, allowed_hosts)
-    raw = _http_get_bytes(manifest_url)
+def _sha256_bytes(b: bytes) -> str:
+    return hashlib.sha256(b).hexdigest()
+
+
+def _manifest_base_url(manifest_url: str) -> str:
+    # "https://.../manifest.json" -> "https://.../"
+    u = (manifest_url or "").strip()
+    if not u:
+        return ""
+    if "/" not in u:
+        return u
+    return u.rsplit("/", 1)[0] + "/"
+
+
+def _read_manifest(manifest_url: str) -> Dict[str, Any]:
+    raw = _http_get_bytes(manifest_url, timeout=60)
     try:
-        j = json.loads(raw.decode("utf-8"))
-        if not isinstance(j, dict):
-            raise ValueError("manifest is not a json object")
-        return j
-    except Exception as e:
-        raise ValueError(f"manifest json parse failed: {e}")
+        return json.loads(raw.decode("utf-8"))
+    except UnicodeDecodeError:
+        # 혹시 BOM/기타 이슈가 있어도 최대한 파싱
+        return json.loads(raw.decode("utf-8", errors="replace"))
 
 
-def _parse_manifest(j: Dict[str, Any], variant: str, patch: str) -> ManifestInfo:
-    # manifest.json 생성 스크립트에 따라 키가 달라도 최대한 호환
-    v = (j.get("variant") or j.get("profile") or "").strip().lower()
-    p = (j.get("patch") or j.get("target_patch") or "").strip()
+def _extract_file_entry(manifest: Dict[str, Any], patch: str) -> Dict[str, Any]:
+    """
+    지원하는 manifest 형태:
 
-    # 강제 체크(실수 방지)
-    if v and v != variant:
-        raise ValueError(f"manifest variant mismatch: manifest={v}, expected={variant}")
-    if p and p != patch:
-        raise ValueError(f"manifest patch mismatch: manifest={p}, expected={patch}")
+    1) (구형/단순형)
+      { "db_gz_url": "...", "db_gz_sha256": "..." }
 
-    created_at = j.get("created_at") or j.get("createdAt")
+    2) (현재 너의 형태)
+      {
+        "files": {
+          "16.2": { "filename": "...db.gz", "sha256": "...", ... }
+        }
+      }
+    """
+    # 형태 1
+    if isinstance(manifest, dict):
+        if manifest.get("db_gz_url") and manifest.get("db_gz_sha256"):
+            return {
+                "db_gz_url": str(manifest["db_gz_url"]),
+                "db_gz_sha256": str(manifest["db_gz_sha256"]),
+            }
 
-    db_gz_url = (j.get("db_gz_url") or j.get("dbGzUrl") or "").strip()
-    db_gz_sha256 = (j.get("db_gz_sha256") or j.get("dbGzSha256") or j.get("sha256") or "").strip().lower()
+    # 형태 2
+    files = manifest.get("files")
+    if isinstance(files, dict):
+        entry = files.get(patch) or files.get(str(patch))
+        if isinstance(entry, dict):
+            filename = entry.get("filename")
+            sha256 = entry.get("sha256")
+            if filename and sha256:
+                return {
+                    "filename": str(filename),
+                    "sha256": str(sha256),
+                    "bytes": entry.get("bytes"),
+                    "patch": entry.get("patch", patch),
+                    "variant": entry.get("variant"),
+                }
 
-    if not db_gz_url or not db_gz_sha256:
-        raise ValueError("manifest missing db_gz_url or db_gz_sha256")
-
-    return ManifestInfo(
-        variant=variant,
-        patch=patch,
-        created_at=str(created_at) if created_at else None,
-        db_gz_url=db_gz_url,
-        db_gz_sha256=db_gz_sha256,
-    )
+    raise ValueError("manifest missing db_gz_url/db_gz_sha256 OR files[patch].filename/files[patch].sha256")
 
 
-def _atomic_replace(src: Path, dst: Path) -> None:
+def _download_to_tmp(url: str, tmp_dir: Path) -> Path:
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    out = tmp_dir / ("download_" + str(int(time.time() * 1000)) + ".bin")
+    data = _http_get_bytes(url, timeout=180)
+    out.write_bytes(data)
+    return out
+
+
+def _gunzip_file(src_gz: Path, dst: Path) -> None:
+    import gzip
+
     dst.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dst.with_suffix(dst.suffix + ".tmp")
-    if tmp.exists():
-        try:
-            tmp.unlink()
-        except Exception:
-            pass
-    shutil.copyfile(src, tmp)
-    os.replace(str(tmp), str(dst))
+    with gzip.open(src_gz, "rb") as f_in, dst.open("wb") as f_out:
+        shutil.copyfileobj(f_in, f_out)
 
 
 def ensure_patch_db_from_manifest(
     manifest_url: str,
     variant: str,
     patch: str,
-    out_dir: str = "db",
+    out_dir: str,
     force: bool = False,
-    allowed_hosts: Optional[set[str]] = None,
 ) -> Path:
     """
-    manifest_url (https)에서 db.gz + sha256을 받아서
-    out_dir/lol_graph_{variant}_{patch}.db 를 만든다.
+    - manifest_url 에서 manifest.json을 읽고
+    - patch에 해당하는 *.db.gz 를 다운로드
+    - sha256 검증 후 압축 해제하여 out_dir에 저장
+    - 최종 파일명 규칙: out_dir/lol_graph_{variant}_{patch}.db
 
-    - 이미 파일이 있으면(force=False) 재다운로드 안 함
-    - 보안: https only + host allowlist + sha256 검증
+    return: 생성/존재하는 db 경로(Path)
     """
-    variant2 = (variant or "").strip().lower()
-    patch2 = (patch or "").strip()
-    if not variant2:
-        raise ValueError("variant is empty")
-    if not patch2 or patch2.upper() == "ALL":
-        raise ValueError("patch must be specific (not ALL)")
+    v = (variant or "").strip().lower() or "public"
+    p = (patch or "").strip()
+    if not p or p.upper() == "ALL":
+        raise ValueError("patch must be a specific patch like '16.2' (not ALL)")
 
-    out = _ensure_dir(out_dir)
-    dst_db = out / f"lol_graph_{variant2}_{patch2}.db"
+    out_dir_p = Path(out_dir).resolve()
+    out_dir_p.mkdir(parents=True, exist_ok=True)
 
-    if dst_db.exists() and not force:
-        return dst_db
+    final_db = out_dir_p / f"lol_graph_{v}_{p}.db"
+    if final_db.exists() and not force:
+        return final_db
 
-    allow = allowed_hosts or DEFAULT_ALLOWED_HOSTS
+    manifest = _read_manifest(manifest_url)
+    entry = _extract_file_entry(manifest, p)
 
-    # 1) manifest load
-    mj = _read_manifest(manifest_url, allow)
-    info = _parse_manifest(mj, variant2, patch2)
+    # URL/sha 추출
+    db_gz_url: Optional[str] = entry.get("db_gz_url")
+    db_gz_sha256: Optional[str] = entry.get("db_gz_sha256")
 
-    # 2) validate db url
-    _check_url_security(info.db_gz_url, allow)
+    if not (db_gz_url and db_gz_sha256):
+        # files[patch] 형태 -> base_url + filename
+        filename = entry.get("filename")
+        sha256 = entry.get("sha256")
+        if not (filename and sha256):
+            raise ValueError("manifest missing db_gz_url or db_gz_sha256")
+        base = _manifest_base_url(manifest_url)
+        db_gz_url = base + str(filename)
+        db_gz_sha256 = str(sha256)
 
-    # 3) download gz
-    gz_bytes = _http_get_bytes(info.db_gz_url)
+    # 다운로드 + 검증 + 압축해제는 원자적으로 처리
+    tmp_root = out_dir_p / ".tmp"
+    tmp_root.mkdir(parents=True, exist_ok=True)
 
-    # 4) sha256 verify
-    got = _sha256_hex(gz_bytes).lower()
-    exp = info.db_gz_sha256.lower()
-    if got != exp:
-        raise ValueError(f"sha256 mismatch for db.gz: got={got}, expected={exp}")
+    with tempfile.TemporaryDirectory(dir=str(tmp_root)) as td:
+        td_p = Path(td)
 
-    # 5) decompress to temp file
-    tmp_gz = out / f".tmp_{variant2}_{patch2}_{_now_ts()}.db.gz"
-    tmp_db = out / f".tmp_{variant2}_{patch2}_{_now_ts()}.db"
+        gz_path = _download_to_tmp(db_gz_url, td_p)
 
-    tmp_gz.write_bytes(gz_bytes)
+        # sha256 검증 (gz 파일 기준)
+        got = _sha256_file(gz_path).lower()
+        exp = str(db_gz_sha256).strip().lower()
+        if got != exp:
+            raise ValueError(f"sha256 mismatch for gz: expected={exp} got={got}")
 
-    try:
-        with gzip.open(tmp_gz, "rb") as f_in:
-            with open(tmp_db, "wb") as f_out:
-                shutil.copyfileobj(f_in, f_out)
+        tmp_db = td_p / f"tmp_{v}_{p}.db"
+        _gunzip_file(gz_path, tmp_db)
 
-        # 6) atomic replace final db
-        _atomic_replace(tmp_db, dst_db)
-        return dst_db
-    finally:
-        for p in (tmp_gz, tmp_db):
-            try:
-                if p.exists():
-                    p.unlink()
-            except Exception:
-                pass
+        # 최종 파일로 이동(원자적 교체)
+        # Windows/리눅스 모두 고려: replace 사용
+        tmp_final = out_dir_p / (final_db.name + ".tmp")
+        shutil.copy2(tmp_db, tmp_final)
+        os.replace(str(tmp_final), str(final_db))
+
+    return final_db
