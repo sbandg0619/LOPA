@@ -54,11 +54,9 @@ PROFILE = (os.getenv("APP_PROFILE") or "personal").strip().lower()
 DEFAULT_DB_BY_PROFILE = "lol_graph_public.db" if PROFILE == "public" else "lol_graph_personal.db"
 DEFAULT_DB = os.getenv("LOPA_DB_DEFAULT") or DEFAULT_DB_BY_PROFILE
 
-# ✅ 릴리즈 manifest URL (프로필별)
 MANIFEST_PUBLIC = (os.getenv("LOPA_RELEASE_MANIFEST_PUBLIC") or "").strip()
 MANIFEST_PERSONAL = (os.getenv("LOPA_RELEASE_MANIFEST_PERSONAL") or "").strip()
 
-# ✅ DB 저장 폴더
 DB_DIR = (os.getenv("LOPA_DB_DIR") or "db").strip()
 
 
@@ -141,23 +139,46 @@ def _is_explicit_db_path(user_db_path: str) -> bool:
     return True
 
 
+def _is_path_like(p: str) -> bool:
+    p = (p or "").strip()
+    if not p:
+        return False
+    if os.path.isabs(p):
+        return True
+    return ("/" in p) or ("\\" in p)
+
+
+def _resolve_all_db_path(user_db_path: str) -> str:
+    """
+    ✅ 중요(네 요구사항 반영):
+    - patch=ALL 단일 DB는 "절대 CWD에서 찾지 않음"
+    - db_path가 파일명만 오면 무조건 DB_DIR 아래로 해석한다.
+    - db_path가 경로면 그대로 사용한다.
+    """
+    raw = (user_db_path or "").strip()
+    use = raw if raw else DEFAULT_DB
+
+    if _is_path_like(use):
+        return use
+
+    # 파일명만 오면 DB_DIR 밑으로 강제
+    return os.path.join(DB_DIR, use)
+
+
 def _resolve_db_path_for_request(user_db_path: str, patch: str) -> str:
     """
     규칙:
     - patch == "ALL":
-        - 유저가 db_path를 줬으면 그걸(존재 여부는 _ensure에서 처리)
-        - 아니면 DEFAULT_DB
+        - 단일 DB는 _resolve_all_db_path()로 해결(= DB_DIR 강제)
     - patch != "ALL":
-        - 유저가 db_path를 "명시적으로" 줬으면 그걸 사용(고급 사용자/디버그용)
+        - 유저가 db_path를 "명시적으로" 줬으면 그걸 사용(고급/디버그용)
         - 아니면 db_dir/lol_graph_{variant}_{patch}.db 를 사용 (없으면 자동 다운로드 대상)
     """
     patch = normalize_patch(patch)
 
     if patch == "ALL":
-        p = (user_db_path or "").strip()
-        return p if p else DEFAULT_DB
+        return _resolve_all_db_path(user_db_path)
 
-    # patch 분리 모드
     if _is_explicit_db_path(user_db_path):
         return user_db_path
 
@@ -169,23 +190,20 @@ def _resolve_db_path_for_request(user_db_path: str, patch: str) -> str:
 def _ensure_patch_db_if_needed(db_path: str, patch: str) -> str:
     patch = normalize_patch(patch)
 
-    # DB_DIR 보장 (Render의 /tmp 같은 경로 포함)
     try:
         os.makedirs(DB_DIR, exist_ok=True)
     except Exception:
         pass
 
-    # ALL은 자동다운로드 대상 아님(단일 DB 호환 유지)
+    # ALL은 단일 DB 사용. (다운로드는 start script가 담당)
     if patch == "ALL":
         if not os.path.exists(db_path):
             raise FileNotFoundError(f"DB not found: {db_path} (patch=ALL)")
         return db_path
 
-    # patch DB 파일이 있으면 OK
     if os.path.exists(db_path):
         return db_path
 
-    # 없으면 manifest로 다운받아 생성 시도
     variant = _variant_for_profile()
     manifest_url = _manifest_for_variant(variant)
     if not manifest_url:
@@ -244,11 +262,14 @@ class RecommendResponse(BaseModel):
 # -------------------------
 @app.get("/health")
 def health():
+    resolved_default = _resolve_db_path_for_request(DEFAULT_DB, "ALL")
     return {
         "ok": True,
         "profile": PROFILE,
         "default_db": DEFAULT_DB,
         "db_dir": DB_DIR,
+        "default_db_resolved": resolved_default,
+        "default_db_exists": bool(os.path.exists(resolved_default)),
         "manifest_public_set": bool(MANIFEST_PUBLIC),
         "manifest_personal_set": bool(MANIFEST_PERSONAL),
     }
@@ -256,9 +277,6 @@ def health():
 
 @app.get("/meta")
 def meta(db_path: str = DEFAULT_DB, patch: str = "ALL"):
-    """
-    ✅ patch가 ALL이 아니면: 해당 patch DB를 자동으로 받아 만든 뒤 meta 계산
-    """
     try:
         patch2 = normalize_patch(patch)
         resolved = _resolve_db_path_for_request(db_path, patch2)
@@ -290,6 +308,7 @@ def env_debug():
         "loaded_envs": _LOADED_ENVS,
         "default_db": DEFAULT_DB,
         "db_dir": DB_DIR,
+        "default_db_resolved": _resolve_db_path_for_request(DEFAULT_DB, "ALL"),
         "manifest_public": MANIFEST_PUBLIC,
         "manifest_personal": MANIFEST_PERSONAL,
     }
@@ -351,7 +370,6 @@ def recommend(req: RecommendRequest):
                 "max_candidates": req.max_candidates,
                 "use_champ_pool": req.use_champ_pool,
                 "reason": meta2.get("reason", "ok"),
-
                 "enemy_role_guess": meta2.get("enemy_role_guess", {}) or {},
                 "enemy_role_guess_method": meta2.get("enemy_role_guess_method", "unknown"),
                 "enemy_role_guess_detail": meta2.get("enemy_role_guess_detail", {}) or {},
