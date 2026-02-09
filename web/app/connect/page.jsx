@@ -25,15 +25,13 @@ function ConnectInner() {
   const qsApi = useMemo(() => (sp.get("api") || "").trim(), [sp]);
   const qsNext = useMemo(() => (sp.get("next") || "/recommend").trim() || "/recommend", [sp]);
 
-  // 1) 최초: localStorage 값 로드 (constants가 기본값 정책을 가진다)
+  // 1) 최초: localStorage 값 로드 (constants가 로컬/배포 기본값까지 처리)
   useEffect(() => {
     const cfg = getBridgeConfig();
-
-    // ✅ 핵심: 빈 문자열("")도 유효한 값으로 존중해야 함
-    // - 배포에서 cfg.bridgeBase가 ""이면 그대로 "" 유지 (127로 fallback 금지)
-    setBridgeBase(cfg?.bridgeBase ?? "");
-    setBridgeToken(cfg?.bridgeToken ?? "");
-    setApiBase(cfg?.apiBase ?? "");
+    // ✅ 중요: cfg.bridgeBase가 ""(배포 기본 OFF)일 수 있으니 || fallback 금지
+    setBridgeBase(typeof cfg?.bridgeBase === "string" ? cfg.bridgeBase : "");
+    setBridgeToken(cfg?.bridgeToken || "");
+    setApiBase(cfg?.apiBase || "");
   }, []);
 
   // 2) URL 파라미터가 있으면 입력칸에도 반영
@@ -51,13 +49,9 @@ function ConnectInner() {
   useEffect(() => {
     if (!qsBridge && !qsToken && !qsApi) return;
 
-    // ✅ 핵심: qs에 없는 값은 "기존 저장값"을 유지 (없으면 constants 기본값)
-    // 이렇게 하면 api만 들어온 경우 bridge를 127로 억지 저장하는 사고가 없어짐
-    const prev = getBridgeConfig();
-
-    const saveBridge = (qsBridge ? qsBridge : (prev?.bridgeBase ?? "")).trim().replace(/\/$/, "");
-    const saveToken = (qsToken ? qsToken : (prev?.bridgeToken ?? "")).trim();
-    const saveApi = (qsApi ? qsApi : (prev?.apiBase ?? "")).trim().replace(/\/$/, "");
+    const saveBridge = (qsBridge || effectiveBridge || "").trim().replace(/\/$/, "");
+    const saveToken = (qsToken || effectiveToken || "").trim();
+    const saveApi = (qsApi || effectiveApi || "").trim().replace(/\/$/, "");
 
     setBridgeConfig({
       bridgeBase: saveBridge,
@@ -115,14 +109,11 @@ function ConnectInner() {
 
   function onClear() {
     clearBridgeConfig();
-    // clear 후에는 constants 기본값 정책대로 다시 로드
     const cfg = getBridgeConfig();
-
-    // ✅ 여기서도 ""를 존중해야 배포에서 127로 다시 채워지는 사고가 없음
-    setBridgeBase(cfg?.bridgeBase ?? "");
-    setBridgeToken(cfg?.bridgeToken ?? "");
-    setApiBase(cfg?.apiBase ?? "");
-
+    // ✅ 여기서도 || fallback 금지 (배포 기본 OFF 유지)
+    setBridgeBase(typeof cfg?.bridgeBase === "string" ? cfg.bridgeBase : "");
+    setBridgeToken(cfg?.bridgeToken || "");
+    setApiBase(cfg?.apiBase || "");
     setMsg("🧹 Cleared local config.");
     setRaw(null);
   }
@@ -168,7 +159,7 @@ function ConnectInner() {
               className="input"
               value={bridgeBase}
               onChange={(e) => setBridgeBase(e.target.value)}
-              placeholder="http://127.0.0.1:12145"
+              placeholder="(배포 기본: 비워두면 브릿지 OFF / 로컬: http://127.0.0.1:12145)"
             />
           </label>
 
@@ -209,7 +200,7 @@ function ConnectInner() {
               className="input"
               value={apiBase}
               onChange={(e) => setApiBase(e.target.value)}
-              placeholder="(env or https://lopa-api.onrender.com)"
+              placeholder="(env 우선 / 예: https://lopa-api.onrender.com)"
               spellCheck={false}
             />
             <div className="p" style={{ marginTop: 6, fontSize: 12, opacity: 0.9 }}>
