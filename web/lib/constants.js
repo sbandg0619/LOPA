@@ -1,22 +1,68 @@
 // web/lib/constants.js
-// 목적: Bridge 설정을 localStorage에 "하나의 키"로만 저장/읽기
-// + CMD escape(^) 등으로 base 끝에 쓰레기 문자가 붙는 경우 자동 정리
-// + ✅ API base(로컬/서버)도 함께 저장해서 Recommend/API 호출이 같은 값을 보게 함
+// 목적:
+// - Bridge 설정을 localStorage에 "하나의 키"로 저장/읽기
+// - 배포 환경에서는 기본 bridgeBase를 비워서(=브릿지 OFF) 브릿지 없이도 웹이 동작하게 함
+// - API base도 함께 저장/읽기 (env 우선, 배포 기본은 Render로 fallback)
 
 const KEY = "lopa_bridge_config_v1";
-const DEFAULT_BRIDGE_BASE = "http://127.0.0.1:12145";
 
-// ✅ 배포 기본 API는 env 우선 (없으면 로컬)
-const DEFAULT_API_BASE =
-  (typeof process !== "undefined" && process.env && process.env.NEXT_PUBLIC_API_BASE) ||
-  "http://127.0.0.1:8000";
+const DEFAULT_BRIDGE_BASE_LOCAL = "http://127.0.0.1:12145";
+const DEFAULT_API_BASE_LOCAL = "http://127.0.0.1:8000";
+
+// ✅ 배포 기본 API fallback (env가 비어있을 때만 사용)
+const DEFAULT_API_BASE_REMOTE = "https://lopa-api.onrender.com";
 
 function canUseStorage() {
   return typeof window !== "undefined" && typeof window.localStorage !== "undefined";
 }
 
-function sanitizeUrlBase(x, fallback) {
-  let s = String(x || "").trim();
+function isLocalhostHostname(host) {
+  const h = String(host || "").trim().toLowerCase();
+  return h === "localhost" || h === "127.0.0.1";
+}
+
+function defaultBridgeBase() {
+  // ✅ 배포(=localhost 아님)에서는 기본 bridgeBase를 비워서 브릿지 폴링을 막는다.
+  try {
+    if (typeof window !== "undefined") {
+      const onLocal = isLocalhostHostname(window.location.hostname || "");
+      return onLocal ? DEFAULT_BRIDGE_BASE_LOCAL : "";
+    }
+  } catch {}
+  // SSR/빌드 환경에서는 안전하게 로컬값을 반환(실제로는 클라에서 다시 결정됨)
+  return DEFAULT_BRIDGE_BASE_LOCAL;
+}
+
+function envApiBase() {
+  try {
+    const v =
+      (typeof process !== "undefined" &&
+        process.env &&
+        process.env.NEXT_PUBLIC_API_BASE) ||
+      "";
+    return String(v || "").trim().replace(/\/$/, "");
+  } catch {
+    return "";
+  }
+}
+
+function defaultApiBase() {
+  // env 우선
+  const e = envApiBase();
+  if (e) return e;
+
+  // env가 비어있으면, 배포면 remote fallback / 로컬이면 local fallback
+  try {
+    if (typeof window !== "undefined") {
+      const onLocal = isLocalhostHostname(window.location.hostname || "");
+      return onLocal ? DEFAULT_API_BASE_LOCAL : DEFAULT_API_BASE_REMOTE;
+    }
+  } catch {}
+  return DEFAULT_API_BASE_LOCAL;
+}
+
+function sanitizeUrlBase(x, fallback, { allowEmpty = false } = {}) {
+  let s = String(x ?? "").trim();
 
   // 흔한 오염 제거: 끝의 ^, 따옴표, 공백
   s = s.replace(/[\s\^"']+$/g, "");
@@ -25,53 +71,58 @@ function sanitizeUrlBase(x, fallback) {
   // 마지막 / 제거
   s = s.replace(/\/$/, "");
 
-  // 비어있으면 fallback
-  if (!s) return fallback;
+  if (!s) return allowEmpty ? "" : fallback;
 
-  // 너무 빡세게 막지 말고 http(s)만 최소 체크
+  // http(s)만 최소 체크
   if (!(s.startsWith("http://") || s.startsWith("https://"))) return fallback;
 
   return s;
 }
 
 function sanitizeBase(x) {
-  return sanitizeUrlBase(x, DEFAULT_BRIDGE_BASE);
+  // ✅ 브릿지는 "비어있음"을 허용(=브릿지 OFF)
+  return sanitizeUrlBase(x, defaultBridgeBase(), { allowEmpty: true });
 }
 
 function sanitizeApiBase(x) {
-  return sanitizeUrlBase(x, DEFAULT_API_BASE);
+  return sanitizeUrlBase(x, defaultApiBase(), { allowEmpty: false });
 }
 
 function sanitizeToken(x) {
-  return String(x || "").trim().replace(/^["']+|["']+$/g, "");
+  return String(x ?? "").trim().replace(/^["']+|["']+$/g, "");
 }
 
 export function getBridgeConfig() {
-  if (!canUseStorage()) return { bridgeBase: DEFAULT_BRIDGE_BASE, bridgeToken: "", apiBase: DEFAULT_API_BASE };
+  const bridgeFallback = defaultBridgeBase();
+  const apiFallback = defaultApiBase();
+
+  if (!canUseStorage()) {
+    return { bridgeBase: bridgeFallback, bridgeToken: "", apiBase: apiFallback };
+  }
 
   try {
     const raw = window.localStorage.getItem(KEY);
-    if (!raw) return { bridgeBase: DEFAULT_BRIDGE_BASE, bridgeToken: "", apiBase: DEFAULT_API_BASE };
+    if (!raw) return { bridgeBase: bridgeFallback, bridgeToken: "", apiBase: apiFallback };
 
     const j = JSON.parse(raw);
 
     // 이전 버전 호환(bridgeBase/base, bridgeToken/token)
-    const bridgeBase = sanitizeBase(j?.bridgeBase || j?.base || DEFAULT_BRIDGE_BASE);
-    const bridgeToken = sanitizeToken(j?.bridgeToken || j?.token || "");
+    const bridgeBase = sanitizeBase(j?.bridgeBase ?? j?.base ?? bridgeFallback);
+    const bridgeToken = sanitizeToken(j?.bridgeToken ?? j?.token ?? "");
 
     // apiBase 호환
     const apiBase = sanitizeApiBase(
-      j?.apiBase || j?.api_base || j?.api || j?.API_BASE || DEFAULT_API_BASE
+      j?.apiBase ?? j?.api_base ?? j?.api ?? j?.API_BASE ?? apiFallback
     );
 
     return { bridgeBase, bridgeToken, apiBase };
   } catch {
-    return { bridgeBase: DEFAULT_BRIDGE_BASE, bridgeToken: "", apiBase: DEFAULT_API_BASE };
+    return { bridgeBase: bridgeFallback, bridgeToken: "", apiBase: apiFallback };
   }
 }
 
 export function getBridgeBase() {
-  return getBridgeConfig().bridgeBase || DEFAULT_BRIDGE_BASE;
+  return getBridgeConfig().bridgeBase || "";
 }
 
 export function getBridgeToken() {
@@ -79,25 +130,22 @@ export function getBridgeToken() {
 }
 
 export function getApiBase() {
-  return getBridgeConfig().apiBase || DEFAULT_API_BASE;
+  return getBridgeConfig().apiBase || defaultApiBase();
 }
 
 export function setBridgeConfig({ bridgeBase, bridgeToken, apiBase }) {
   if (!canUseStorage()) return;
 
-  const base = sanitizeBase(bridgeBase || DEFAULT_BRIDGE_BASE);
-  const token = sanitizeToken(bridgeToken || "");
+  const prev = getBridgeConfig();
 
-  // apiBase가 안 오면 "기존 저장값"을 유지 (없으면 기본값)
-  let api = DEFAULT_API_BASE;
-  try {
-    const prev = getBridgeConfig();
-    api = prev?.apiBase || DEFAULT_API_BASE;
-  } catch {}
+  const base = sanitizeBase(typeof bridgeBase === "undefined" ? prev.bridgeBase : bridgeBase);
+  const token = sanitizeToken(typeof bridgeToken === "undefined" ? prev.bridgeToken : bridgeToken);
 
-  if (typeof apiBase !== "undefined") {
-    api = sanitizeApiBase(apiBase || DEFAULT_API_BASE);
-  }
+  // apiBase가 안 오면 기존 유지
+  const api =
+    typeof apiBase === "undefined"
+      ? sanitizeApiBase(prev.apiBase)
+      : sanitizeApiBase(apiBase);
 
   const payload = {
     bridgeBase: base,
