@@ -1,4 +1,3 @@
-# backfill_rank.py
 from __future__ import annotations
 
 import argparse
@@ -28,6 +27,10 @@ def load_env_for_profile(profile: str):
             load_dotenv(p, override=False)
             loaded.append(str(p))
     return loaded
+
+
+def _patch_pat(patch: str) -> str:
+    return "%" if (patch or "").strip().upper() == "ALL" else (patch or "").strip()
 
 
 # -----------------------------
@@ -80,49 +83,53 @@ def score_to_tier_label(score: float | None) -> str | None:
 
 
 # -----------------------------
-# pick puuids to process (IMPORTANT)
+# pick puuids to process (patch-aware)
 # -----------------------------
-def pick_target_puuids(con: sqlite3.Connection, max_players: int, debug: bool) -> list[str]:
-    """
-    핵심: players LIMIT N이 아니라,
-    1) match_tier가 아직 비어있는 match들의 participants puuid를 우선
-    2) 그 안에서도 '등장 횟수 많은 puuid'부터
-    3) 그래도 부족하면 players에서 tier NULL인 puuid로 보충
-    """
-    # 0) players가 비어있으면 participants로 안전하게 채움
-    con.execute("""
+def pick_target_puuids(con: sqlite3.Connection, patch: str, method: str, max_players: int, debug: bool) -> list[str]:
+    patch_pat = _patch_pat(patch)
+
+    # patch 범위 participants 기반 players 보강
+    con.execute(
+        """
         INSERT OR IGNORE INTO players(puuid, summoner_id, tier, division, league_points, last_rank_update)
-        SELECT DISTINCT puuid, NULL, NULL, NULL, NULL, NULL FROM participants
-    """)
+        SELECT DISTINCT p.puuid, NULL, NULL, NULL, NULL, NULL
+        FROM participants p
+        JOIN matches m ON m.match_id = p.match_id
+        WHERE m.patch LIKE ?
+        """,
+        (patch_pat,),
+    )
     con.commit()
 
-    # 1) match_tier가 비어있는 match들의 puuid를 등장횟수 순으로
+    # match_tier 비어있는 match(해당 method 기준)의 puuid를 등장횟수 순으로
     rows = con.execute(
         """
         SELECT p.puuid, COUNT(*) AS c
         FROM participants p
         JOIN matches m ON m.match_id = p.match_id
-        LEFT JOIN match_tier mt ON mt.match_id = m.match_id
-        WHERE mt.tier_label IS NULL OR mt.tier_label=''
+        LEFT JOIN match_tier mt
+          ON mt.match_id = m.match_id
+         AND mt.method = ?
+        WHERE m.patch LIKE ?
+          AND (mt.tier_label IS NULL OR mt.tier_label = '')
         GROUP BY p.puuid
         ORDER BY c DESC
         LIMIT ?
         """,
-        (max_players,),
+        (method, patch_pat, max_players),
     ).fetchall()
     puuids = [r[0] for r in rows]
 
     if debug:
         print("[debug] puuids_from_missing_match_tier=", len(puuids))
 
-    # 2) 부족하면 tier가 아직 NULL인 players에서 추가
     if len(puuids) < max_players:
         need = max_players - len(puuids)
         rows2 = con.execute(
             """
-            SELECT puuid
-            FROM players
-            WHERE tier IS NULL OR tier=''
+            SELECT pl.puuid
+            FROM players pl
+            WHERE (pl.tier IS NULL OR pl.tier = '')
             LIMIT ?
             """,
             (need,),
@@ -132,7 +139,6 @@ def pick_target_puuids(con: sqlite3.Connection, max_players: int, debug: bool) -
         if debug:
             print("[debug] puuids_filled_from_players_null=", len(rows2))
 
-    # 중복 제거(순서 유지)
     seen = set()
     uniq = []
     for p in puuids:
@@ -143,12 +149,11 @@ def pick_target_puuids(con: sqlite3.Connection, max_players: int, debug: bool) -
     return uniq[:max_players]
 
 
-# -----------------------------
-# main
-# -----------------------------
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", required=True)
+    ap.add_argument("--patch", default="ALL", help="예: 16.2 / ALL")
+    ap.add_argument("--method", default="median", help="match_tier method (default: median)")
     ap.add_argument("--max_players", type=int, default=400)
     ap.add_argument("--min_known", type=int, default=6)
     ap.add_argument("--sleep", type=float, default=0.18)
@@ -159,7 +164,7 @@ def main():
     loaded = load_env_for_profile(profile)
 
     api_key = (os.getenv("RIOT_API_KEY") or "").strip()
-    print(f"PROFILE {profile} KEY_HEAD {(api_key[:8] if api_key else '')}")
+    print(f"PROFILE {profile} KEY_HEAD {(api_key[:8] if api_key else '')} PATCH {args.patch} METHOD {args.method}")
     if args.debug:
         print("DOTENV_LOADED", loaded)
 
@@ -170,7 +175,7 @@ def main():
     con = sqlite3.connect(args.db, check_same_thread=False)
     con.row_factory = sqlite3.Row
 
-    puuids = pick_target_puuids(con, args.max_players, args.debug)
+    puuids = pick_target_puuids(con, args.patch, args.method, args.max_players, args.debug)
 
     if args.debug:
         print("[debug] players_count_in_db=", con.execute("SELECT COUNT(*) FROM players").fetchone()[0])
@@ -246,14 +251,21 @@ def main():
     print(f"[players] puuid_ok={puuid_ok}")
     print(f"[players] updated={updated}, with_tier={with_tier} status_hist={status_hist}")
 
+    patch_pat = _patch_pat(args.patch)
+
     # -------------------------
-    # 2) match_participant_rank 갱신
+    # 2) match_participant_rank 갱신 (patch 범위만)
     # -------------------------
-    rows = con.execute("""
+    rows = con.execute(
+        """
         SELECT p.match_id, p.puuid, pl.tier, pl.division, pl.league_points
         FROM participants p
+        JOIN matches m ON m.match_id = p.match_id
         JOIN players pl ON pl.puuid = p.puuid
-    """).fetchall()
+        WHERE m.patch LIKE ?
+        """,
+        (patch_pat,),
+    ).fetchall()
 
     con.executemany(
         """
@@ -271,24 +283,33 @@ def main():
 
     # -------------------------
     # 3) match_tier 계산: match_participant_rank 기반 median
-    #    (tier_label이 비어있는 match만 대상)
+    #    (tier_label이 비어있는 match만, patch 범위만)
     # -------------------------
-    targets = [r[0] for r in con.execute("""
+    targets = [r[0] for r in con.execute(
+        """
         SELECT m.match_id
         FROM matches m
-        LEFT JOIN match_tier mt ON mt.match_id = m.match_id
-        WHERE mt.tier_label IS NULL OR mt.tier_label=''
-    """).fetchall()]
+        LEFT JOIN match_tier mt
+          ON mt.match_id = m.match_id
+         AND mt.method = ?
+        WHERE m.patch LIKE ?
+          AND (mt.tier_label IS NULL OR mt.tier_label='')
+        """,
+        (args.method, patch_pat),
+    ).fetchall()]
 
     if args.debug:
         print("[debug] match_tier_targets=", len(targets))
 
     inserted = 0
     for mid in targets:
-        pr = con.execute("""
+        pr = con.execute(
+            """
             SELECT tier, division FROM match_participant_rank
             WHERE match_id=?
-        """, (mid,)).fetchall()
+            """,
+            (mid,),
+        ).fetchall()
 
         scores = []
         for r in pr:
@@ -303,22 +324,21 @@ def main():
         med = float(median(scores))
         label = score_to_tier_label(med)
 
-        patch = con.execute("SELECT patch FROM matches WHERE match_id=?", (mid,)).fetchone()
-        patch = patch[0] if patch else None
+        patch_row = con.execute("SELECT patch FROM matches WHERE match_id=?", (mid,)).fetchone()
+        patch_val = patch_row[0] if patch_row else None
 
         con.execute(
             """
             INSERT INTO match_tier(match_id, patch, method, tier_label, tier_score, known_cnt, as_of_ts)
             VALUES(?,?,?,?,?,?,?)
-            ON CONFLICT(match_id) DO UPDATE SET
+            ON CONFLICT(match_id, method) DO UPDATE SET
               patch=excluded.patch,
-              method=excluded.method,
               tier_label=excluded.tier_label,
               tier_score=excluded.tier_score,
               known_cnt=excluded.known_cnt,
               as_of_ts=excluded.as_of_ts
             """,
-            (mid, patch, "median_current", label, med, known_cnt, now_ts),
+            (mid, patch_val, args.method, label, med, known_cnt, now_ts),
         )
         inserted += 1
 

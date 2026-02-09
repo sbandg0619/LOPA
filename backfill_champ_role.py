@@ -85,6 +85,10 @@ def main():
     ap.add_argument("--commit_every", type=int, default=200, help="몇 매치마다 commit 할지")
     args = ap.parse_args()
 
+    # ✅ 윈도우 배치에서 넘어오는 숨은 \r/공백 제거
+    args.patch = (args.patch or "ALL").strip()
+    args.tier = (args.tier or "ALL").strip()
+
     con = _connect(args.db)
     _ensure_done_table(con)
 
@@ -103,7 +107,6 @@ def main():
     patch_pat = _patch_pat(args.patch)
     ft = _force_tier(args.tier)
 
-    # 미처리 match만 가져와서 처리
     mids = con.execute(
         """
         SELECT m.match_id, m.patch,
@@ -128,7 +131,6 @@ def main():
     cur = con.cursor()
 
     for (mid, patch, mt_tier) in mids:
-        # 이 match의 tier 결정
         tier = ft if ft is not None else mt_tier
 
         rows = cur.execute(
@@ -170,7 +172,6 @@ def main():
             done_rows.clear()
             print(f"progress {processed}/{len(mids)}")
 
-    # flush
     if agg or done_rows:
         con.execute("BEGIN;")
         if agg:

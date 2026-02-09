@@ -58,3 +58,14 @@ pnpm-debug.log*
 *.swp
 
 !lol_graph_public.db
+
+# --- local artifacts (db/releases/logs) --- 
+release_out/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.gz
+logs/
+*.log

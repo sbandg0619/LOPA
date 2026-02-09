@@ -20,6 +20,11 @@ def _clean_key(raw: str | None) -> str:
     return key.strip().strip('"').strip("'")
 
 
+def _truthy(v: str | None) -> bool:
+    s = (v or "").strip().lower()
+    return s in ("1", "true", "yes", "y", "on")
+
+
 def _load_env_candidates() -> list[str]:
     """
     ✅ 프로필 기반 env 로드
@@ -35,18 +40,17 @@ def _load_env_candidates() -> list[str]:
     here = Path(__file__).resolve().parent
     profile = (os.getenv("APP_PROFILE") or "").strip().lower()
 
-    cands = []
+    cands: list[Path] = []
     if profile:
         cands.append(here / f".env.{profile}")
 
-    # common fallbacks
     cands.extend([
         here / ".env.public",
         here / ".env.personal",
         here / ".env",
     ])
 
-    loaded = []
+    loaded: list[str] = []
     for p in cands:
         if p.exists():
             load_dotenv(dotenv_path=p, override=False)
@@ -142,6 +146,16 @@ class RiotClient:
         self.throttle_limit_1s = int(os.getenv("RIOT_THROTTLE_1S", str(max(1, self.limit_1s - 1))))
         self.throttle_limit_120s = int(os.getenv("RIOT_THROTTLE_120S", str(max(1, self.limit_120s - 5))))
 
+        # ✅ pacing 옵션 (기본 OFF)
+        # - 개인키 BAT에서 set RIOT_PACE_120S=1 로 켜서 사용
+        self.pace_enabled = _truthy(os.getenv("RIOT_PACE_120S") or os.getenv("RIOT_PACE"))
+        self._last_pace_ts = 0.0
+
+        # ✅ 로그 옵션
+        # - 네 요청: 429가 아닌 wait(자체 pacing/throttle)는 출력하지 않음
+        self.log_429 = _truthy(os.getenv("RIOT_LOG_429") or "1")          # 기본 ON
+        self.log_pace = _truthy(os.getenv("RIOT_LOG_PACE") or "0")        # 기본 OFF (원하면 켜기)
+
         self._sleep_quantum = 0.05
         self.timeout = float(os.getenv("RIOT_TIMEOUT", "15"))
 
@@ -197,7 +211,39 @@ class RiotClient:
             f"hdr_method={self.last_method_count}/{self.last_method_limit}"
         )
 
+    def _pace_before_request(self):
+        """
+        일정 텀으로 "고르게" 요청(pacing).
+        - interval = max(120/throttle_120s, 1/throttle_1s)
+        - 기본적으로 pacing sleep 로그는 안 찍음(원하면 RIOT_LOG_PACE=1)
+        """
+        if not self.pace_enabled:
+            return
+
+        t120 = max(1, int(self.throttle_limit_120s or 1))
+        t1 = max(1, int(self.throttle_limit_1s or 1))
+        interval = max(120.0 / float(t120), 1.0 / float(t1))
+
+        now = time.time()
+        if self._last_pace_ts <= 0:
+            self._last_pace_ts = now
+            return
+
+        next_ts = self._last_pace_ts + interval
+        if now < next_ts:
+            sleep_s = next_ts - now
+            self.sleep_sec_total += sleep_s
+            if self.log_pace:
+                print(f"[RIOT_PACE] sleep {sleep_s:.2f}s (interval={interval:.2f}s, t1={t1}, t120={t120})", flush=True)
+            time.sleep(sleep_s)
+
+        self._last_pace_ts = time.time()
+
     def _throttle_before_request(self):
+        # pacing 먼저
+        self._pace_before_request()
+
+        # 윈도우 기반 throttle(버스트 방지)
         while True:
             now = time.time()
 
@@ -219,6 +265,7 @@ class RiotClient:
             if need_wait <= 0:
                 return
 
+            # 여기서도 로그는 기본 OFF (원하면 RIOT_LOG_PACE=1)
             sleep_s = min(need_wait, self._sleep_quantum)
             self.sleep_sec_total += sleep_s
             time.sleep(sleep_s)
@@ -259,10 +306,26 @@ class RiotClient:
             if r.status_code == 429:
                 self.n_429 += 1
                 self.n_retry += 1
+
                 ra = _parse_retry_after(r.headers)
                 if ra is None:
                     ra = min(self.max_backoff, self.base_backoff * (2 ** (attempt - 1)))
-                self._sleep_with_jitter(max(1.0, float(ra)))
+
+                sleep_s = max(1.0, float(ra))
+
+                # ✅ 네 요청: 429일 때만 출력
+                if self.log_429:
+                    app = r.headers.get("X-App-Rate-Limit-Count")
+                    app_lim = r.headers.get("X-App-Rate-Limit")
+                    meth = r.headers.get("X-Method-Rate-Limit-Count")
+                    meth_lim = r.headers.get("X-Method-Rate-Limit")
+                    print(
+                        f"[RIOT_429] retry-after sleep {sleep_s:.2f}s (attempt {attempt}/{self.max_tries}) "
+                        f"app={app}/{app_lim} method={meth}/{meth_lim}",
+                        flush=True,
+                    )
+
+                self._sleep_with_jitter(sleep_s)
                 last_text = r.text
                 continue
 

@@ -83,6 +83,10 @@ def main():
     ap.add_argument("--commit_every", type=int, default=50, help="몇 매치마다 commit 할지(매치업은 무거워서 작게)")
     args = ap.parse_args()
 
+    # ✅ 숨은 \r/공백 제거
+    args.patch = (args.patch or "ALL").strip()
+    args.tier = (args.tier or "ALL").strip()
+
     con = _connect(args.db)
     _ensure_done_table(con)
 

@@ -146,6 +146,21 @@ def main():
     ap.add_argument("--match_tier_min_known", type=int, default=6)
 
     ap.add_argument("--commit_every", type=int, default=50)
+
+    # ✅ 새 옵션: 진행 로그/체크포인트 주기
+    ap.add_argument(
+        "--progress_every_players",
+        type=int,
+        default=1,
+        help="진행 로그 출력 주기(visited player 기준). 1이면 매 플레이어마다 출력",
+    )
+    ap.add_argument(
+        "--checkpoint_every_players",
+        type=int,
+        default=50,
+        help="몇 플레이어마다 commit+checkpoint 저장할지(기존 50 유지)",
+    )
+
     ap.add_argument("--debug", action="store_true")
 
     ap.add_argument("--mode", default="manual", choices=["manual", "dev", "prod"])
@@ -204,6 +219,28 @@ def main():
 
     now_ts = int(time.time())
     refresh_before = now_ts - args.rank_refresh_hours * 3600
+
+    progress_every = max(1, int(args.progress_every_players))
+    checkpoint_every_players = max(1, int(args.checkpoint_every_players))
+    t0 = time.time()
+
+    def _ppm() -> float:
+        el = time.time() - t0
+        if el <= 0:
+            return 0.0
+        return (total_players / el) * 60.0
+
+    def _print_player_progress(tag: str, saved_this_player: int, already_have_skip: int, queue_skip: int, patch_skip: int, did_rank_update: bool, tier_val):
+        print(
+            f"{tag}: player#{total_players} "
+            f"saved_matches={saved_matches} "
+            f"queue={len(q)} "
+            f"this_saved={saved_this_player} "
+            f"have_skip={already_have_skip} queue_skip={queue_skip} patch_skip={patch_skip} "
+            f"explored_non_target={explored_non_target} "
+            f"rank_update={'Y' if did_rank_update else 'N'} tier={tier_val} "
+            f"ppm={_ppm():.1f}"
+        )
 
     # -------- checkpoint helpers (meta merge) --------
     COLLECTOR_META_KEYS = {
@@ -354,19 +391,38 @@ def main():
             seen.add(puuid)
             total_players += 1
 
+            # 기본 카운터(진행 로그용)
+            saved_this_player = 0
+            queue_skip = 0
+            patch_skip = 0
+            already_have_skip = 0
+            did_rank_update = False
+            tier = None
+
             match_ids = rc.match_ids(puuid, count=args.matches_per_player, start_time=start_time)
             if not match_ids:
-                if total_players % 50 == 0:
+                # ✅ 매 플레이어 로그
+                if total_players % progress_every == 0:
+                    _print_player_progress("progress", saved_this_player, already_have_skip, queue_skip, patch_skip, did_rank_update, tier)
+
+                # ✅ 체크포인트 주기
+                if total_players % checkpoint_every_players == 0:
+                    con.commit()
                     checkpoint_save()
+                    print(f"checkpoint: players={total_players}, saved_matches={saved_matches}, explored_non_target={explored_non_target}, queue={len(q)}")
+                    if hasattr(rc, "rate_report"):
+                        try:
+                            print(rc.rate_report())
+                        except Exception:
+                            pass
                 continue
 
             exist_mids = _existing_match_ids(match_ids)
 
             # ---- rank 갱신(강제 ON) ----
             summoner_id = None
-            tier = div = lp = None
+            div = lp = None
 
-            # 기존 row 있으면 summoner_id 재활용
             prev_row = get_player_row_cached(puuid)
             prev_summoner_id = prev_row[0] if prev_row else None
             prev_last_update = (prev_row[4] if prev_row else 0) or 0
@@ -379,30 +435,19 @@ def main():
                     if isinstance(summ2, dict):
                         summoner_id = summ2.get("id")
 
-            did_rank_update = False
             if summoner_id and need_refresh_rank(puuid):
                 try:
                     entries = rc.league_entries_by_summoner(summoner_id) or []
                     tier, div, lp = solo_rank_from_entries(entries)
-                    # tier를 받았든 못 받았든 "요청 자체는 성공"이라면 업데이트 처리할지?
-                    # ✅ 여기서는 tier가 잡힌 경우에만 last_rank_update를 찍어서,
-                    #    실패/빈값이면 다음에 다시 시도 가능하도록 둔다.
                     if tier:
                         did_rank_update = True
                 except Exception:
-                    # 네트워크/레이트/일시 오류면 다음에 재시도 가능하게 last_rank_update 유지
                     did_rank_update = False
 
-            # ✅ FIX: tier를 못 받았으면 last_rank_update를 now로 찍지 않는다.
             new_last_rank_update = int(time.time()) if did_rank_update else int(prev_last_update)
-
             upsert_player(con, puuid, summoner_id, tier, div, lp, new_last_rank_update)
 
             non_target_used = 0
-            saved_this_player = 0
-            queue_skip = 0
-            patch_skip = 0
-            already_have_skip = 0
 
             for mid in match_ids:
                 if mid in exist_mids:
@@ -500,17 +545,15 @@ def main():
                         non_target_used += 1
                         explored_non_target += 1
 
-            if args.debug:
-                print(
-                    f"[debug] player#{total_players} match_ids={len(match_ids)} "
-                    f"have_skip={already_have_skip} queue_skip={queue_skip} patch_skip={patch_skip} saved={saved_this_player} "
-                    f"rank_update={'Y' if did_rank_update else 'N'} tier={tier}"
-                )
+            # ✅ 매 플레이어 로그(기본 ON)
+            if total_players % progress_every == 0:
+                _print_player_progress("progress", saved_this_player, already_have_skip, queue_skip, patch_skip, did_rank_update, tier)
 
-            if total_players % 50 == 0:
+            # ✅ 체크포인트 주기(기존 50 유지 가능)
+            if total_players % checkpoint_every_players == 0:
                 con.commit()
                 checkpoint_save()
-                print(f"progress: players={total_players}, saved_matches={saved_matches}, explored_non_target={explored_non_target}, queue={len(q)} (checkpoint)")
+                print(f"checkpoint: players={total_players}, saved_matches={saved_matches}, explored_non_target={explored_non_target}, queue={len(q)}")
                 if hasattr(rc, "rate_report"):
                     try:
                         print(rc.rate_report())
