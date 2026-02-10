@@ -23,9 +23,6 @@ from release_db import ensure_patch_db_from_manifest
 ROLES = ["TOP", "JUNGLE", "MIDDLE", "BOTTOM", "UTILITY"]
 
 
-# -------------------------
-# .env loader (profile aware)
-# -------------------------
 def _load_env_candidates() -> List[str]:
     here = Path(__file__).resolve().parent
     profile = (os.getenv("APP_PROFILE") or "").strip().lower()
@@ -71,9 +68,6 @@ app.add_middleware(
 )
 
 
-# -------------------------
-# Normalizers (API-side)
-# -------------------------
 _ROLE_MAP = {
     "TOP": "TOP",
     "JUNGLE": "JUNGLE",
@@ -126,11 +120,6 @@ def _variant_for_profile() -> str:
 
 
 def _is_explicit_db_path(user_db_path: str) -> bool:
-    """
-    ✅ 유저가 request에 '명시적으로' db_path를 준 케이스인지 판정
-    - 기본값(DEFAULT_DB)이 그대로 넘어온 경우는 명시로 보지 않음
-    - 빈 문자열도 명시로 보지 않음
-    """
     p = (user_db_path or "").strip()
     if not p:
         return False
@@ -149,31 +138,16 @@ def _is_path_like(p: str) -> bool:
 
 
 def _resolve_all_db_path(user_db_path: str) -> str:
-    """
-    ✅ 중요(네 요구사항 반영):
-    - patch=ALL 단일 DB는 "절대 CWD에서 찾지 않음"
-    - db_path가 파일명만 오면 무조건 DB_DIR 아래로 해석한다.
-    - db_path가 경로면 그대로 사용한다.
-    """
     raw = (user_db_path or "").strip()
     use = raw if raw else DEFAULT_DB
 
     if _is_path_like(use):
         return use
 
-    # 파일명만 오면 DB_DIR 밑으로 강제
     return os.path.join(DB_DIR, use)
 
 
 def _resolve_db_path_for_request(user_db_path: str, patch: str) -> str:
-    """
-    규칙:
-    - patch == "ALL":
-        - 단일 DB는 _resolve_all_db_path()로 해결(= DB_DIR 강제)
-    - patch != "ALL":
-        - 유저가 db_path를 "명시적으로" 줬으면 그걸 사용(고급/디버그용)
-        - 아니면 db_dir/lol_graph_{variant}_{patch}.db 를 사용 (없으면 자동 다운로드 대상)
-    """
     patch = normalize_patch(patch)
 
     if patch == "ALL":
@@ -195,15 +169,32 @@ def _ensure_patch_db_if_needed(db_path: str, patch: str) -> str:
     except Exception:
         pass
 
-    # ALL은 단일 DB 사용. (다운로드는 start script가 담당)
+    # ALL은 단일 DB 사용. (다운로드/갱신은 start script가 담당)
     if patch == "ALL":
         if not os.path.exists(db_path):
             raise FileNotFoundError(f"DB not found: {db_path} (patch=ALL)")
         return db_path
 
+    # ✅ 변경: 파일이 있어도(manifest가 있으면) update-check 가능
     if os.path.exists(db_path):
+        variant = _variant_for_profile()
+        manifest_url = _manifest_for_variant(variant)
+        if manifest_url:
+            try:
+                out = ensure_patch_db_from_manifest(
+                    manifest_url=manifest_url,
+                    variant=variant,
+                    patch=patch,
+                    out_dir=DB_DIR,
+                    force=False,
+                )
+                return str(out)
+            except Exception:
+                # 업데이트 체크/다운로드 실패해도 기존 DB 유지(안정)
+                return db_path
         return db_path
 
+    # 파일이 없으면: manifest로 다운로드 필요
     variant = _variant_for_profile()
     manifest_url = _manifest_for_variant(variant)
     if not manifest_url:
@@ -228,9 +219,6 @@ def _db_connect(db_path: str) -> sqlite3.Connection:
     return sqlite3.connect(db_path, check_same_thread=False)
 
 
-# -------------------------
-# Schemas
-# -------------------------
 class RecommendRequest(BaseModel):
     db_path: str = Field(default=DEFAULT_DB)
     patch: str = Field(default="ALL")
@@ -257,9 +245,6 @@ class RecommendResponse(BaseModel):
     meta: Dict[str, Any]
 
 
-# -------------------------
-# Endpoints
-# -------------------------
 @app.get("/health")
 def health():
     resolved_default = _resolve_db_path_for_request(DEFAULT_DB, "ALL")

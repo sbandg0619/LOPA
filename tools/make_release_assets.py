@@ -5,6 +5,7 @@ import gzip
 import json
 import hashlib
 import time
+import shutil
 from pathlib import Path
 
 
@@ -26,12 +27,18 @@ def gzip_compress(src: Path, dst: Path) -> None:
             f_out.write(b)
 
 
+def write_sha256(digest: str, filename: str, sha_path: Path) -> None:
+    sha_path.write_text(f"{digest}  {filename}\n", encoding="utf-8")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--db", required=True, help="input db path (e.g. lol_graph_public_16.2.db)")
     ap.add_argument("--patch", required=True, help="patch label (e.g. 16.2)")
     ap.add_argument("--variant", default="public", choices=["public", "personal"])
     ap.add_argument("--outdir", default="release_out")
+    # alias 생성 on/off (기본: 켬)
+    ap.add_argument("--no_alias", action="store_true", help="do not create lol_graph_{variant}.db.gz alias")
     args = ap.parse_args()
 
     db = Path(args.db)
@@ -51,7 +58,23 @@ def main():
     print("[2] sha256...")
     digest = sha256_file(gz_path)
     sha_path = outdir / f"{gz_name}.sha256"
-    sha_path.write_text(f"{digest}  {gz_name}\n", encoding="utf-8")
+    write_sha256(digest, gz_name, sha_path)
+
+    # NEW: alias 파일 생성 (예: lol_graph_public.db.gz)
+    alias_gz_name = f"lol_graph_{args.variant}.db.gz"
+    alias_gz_path = outdir / alias_gz_name
+    alias_sha_path = outdir / f"{alias_gz_name}.sha256"
+
+    made_alias = False
+    if not args.no_alias:
+        if alias_gz_path.resolve() != gz_path.resolve():
+            print(f"[2.5] alias: {gz_name} -> {alias_gz_name}")
+            shutil.copy2(gz_path, alias_gz_path)
+            # 내용 동일하므로 digest 동일. sha256 파일만 별칭명으로 따로 기록
+            write_sha256(digest, alias_gz_name, alias_sha_path)
+            made_alias = True
+        else:
+            print("[2.5] alias skipped (same path)")
 
     print("[3] manifest.json update...")
     manifest_path = outdir / "manifest.json"
@@ -81,6 +104,9 @@ def main():
 
     print(f"OK: {gz_path}")
     print(f"OK: {sha_path}")
+    if made_alias:
+        print(f"OK: {alias_gz_path}")
+        print(f"OK: {alias_sha_path}")
     print(f"OK: {manifest_path}")
 
 

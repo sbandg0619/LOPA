@@ -33,12 +33,7 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
-def _sha256_bytes(b: bytes) -> str:
-    return hashlib.sha256(b).hexdigest()
-
-
 def _manifest_base_url(manifest_url: str) -> str:
-    # "https://.../manifest.json" -> "https://.../"
     u = (manifest_url or "").strip()
     if not u:
         return ""
@@ -52,24 +47,10 @@ def _read_manifest(manifest_url: str) -> Dict[str, Any]:
     try:
         return json.loads(raw.decode("utf-8"))
     except UnicodeDecodeError:
-        # 혹시 BOM/기타 이슈가 있어도 최대한 파싱
         return json.loads(raw.decode("utf-8", errors="replace"))
 
 
 def _extract_file_entry(manifest: Dict[str, Any], patch: str) -> Dict[str, Any]:
-    """
-    지원하는 manifest 형태:
-
-    1) (구형/단순형)
-      { "db_gz_url": "...", "db_gz_sha256": "..." }
-
-    2) (현재 너의 형태)
-      {
-        "files": {
-          "16.2": { "filename": "...db.gz", "sha256": "...", ... }
-        }
-      }
-    """
     # 형태 1
     if isinstance(manifest, dict):
         if manifest.get("db_gz_url") and manifest.get("db_gz_sha256"):
@@ -113,6 +94,25 @@ def _gunzip_file(src_gz: Path, dst: Path) -> None:
         shutil.copyfileobj(f_in, f_out)
 
 
+def _read_first_token(path: Path) -> str:
+    try:
+        txt = path.read_text(encoding="utf-8", errors="replace").strip()
+    except FileNotFoundError:
+        return ""
+    if not txt:
+        return ""
+    # "sha" or "sha  filename" -> first token
+    return txt.split()[0].strip()
+
+
+def _touch(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.write_text(str(int(time.time())), encoding="utf-8")
+    except Exception:
+        pass
+
+
 def ensure_patch_db_from_manifest(
     manifest_url: str,
     variant: str,
@@ -121,12 +121,13 @@ def ensure_patch_db_from_manifest(
     force: bool = False,
 ) -> Path:
     """
-    - manifest_url 에서 manifest.json을 읽고
-    - patch에 해당하는 *.db.gz 를 다운로드
+    - manifest_url에서 manifest.json을 읽고 patch에 해당하는 *.db.gz를 다운로드
     - sha256 검증 후 압축 해제하여 out_dir에 저장
     - 최종 파일명 규칙: out_dir/lol_graph_{variant}_{patch}.db
 
-    return: 생성/존재하는 db 경로(Path)
+    ✅ 변경점:
+    - final_db가 이미 있어도, (force=False라도) 일정 주기마다 manifest sha를 확인해서
+      로컬 sha와 다르면 자동으로 재다운로드/교체 가능
     """
     v = (variant or "").strip().lower() or "public"
     p = (patch or "").strip()
@@ -137,18 +138,73 @@ def ensure_patch_db_from_manifest(
     out_dir_p.mkdir(parents=True, exist_ok=True)
 
     final_db = out_dir_p / f"lol_graph_{v}_{p}.db"
-    if final_db.exists() and not force:
-        return final_db
 
+    # 로컬 메타(원격 gz sha 저장)
+    local_sha_path = final_db.with_name(final_db.name + ".sha256")
+    lastcheck_path = final_db.with_name(final_db.name + ".last_check")
+
+    # 체크 주기(초). 기본 3600초. 0 이하이면 체크 비활성(있으면 그냥 씀)
+    try:
+        check_every = int(os.getenv("LOPA_PATCH_DB_UPDATE_CHECK_EVERY", "3600"))
+    except Exception:
+        check_every = 3600
+
+    def should_check_now() -> bool:
+        if check_every <= 0:
+            return False
+        try:
+            if not lastcheck_path.exists():
+                return True
+            age = time.time() - lastcheck_path.stat().st_mtime
+            return age >= check_every
+        except Exception:
+            return True
+
+    # 파일이 있고 force가 아니면:
+    # - 체크 주기 안 됐으면 바로 return
+    # - 체크 주기 됐으면 manifest sha 확인 후 같으면 return, 다르면 교체 진행
+    if final_db.exists() and not force:
+        if not should_check_now():
+            return final_db
+
+        try:
+            manifest = _read_manifest(manifest_url)
+            entry = _extract_file_entry(manifest, p)
+
+            db_gz_url: Optional[str] = entry.get("db_gz_url")
+            db_gz_sha256: Optional[str] = entry.get("db_gz_sha256")
+
+            if not (db_gz_url and db_gz_sha256):
+                filename = entry.get("filename")
+                sha256 = entry.get("sha256")
+                if not (filename and sha256):
+                    _touch(lastcheck_path)
+                    return final_db
+                base = _manifest_base_url(manifest_url)
+                db_gz_url = base + str(filename)
+                db_gz_sha256 = str(sha256)
+
+            remote_sha = str(db_gz_sha256).strip().lower()
+            local_sha = _read_first_token(local_sha_path).lower()
+
+            _touch(lastcheck_path)
+
+            if local_sha and local_sha == remote_sha:
+                return final_db
+            # local_sha가 없거나 다르면 아래 다운로드/교체로 진행
+        except Exception:
+            # 업데이트 체크 실패(네트워크/manifest 문제)면 안정적으로 기존 DB 유지
+            _touch(lastcheck_path)
+            return final_db
+
+    # 여기부터는: (1) 파일이 없거나 (2) force=True거나 (3) sha가 달라서 교체 필요
     manifest = _read_manifest(manifest_url)
     entry = _extract_file_entry(manifest, p)
 
-    # URL/sha 추출
     db_gz_url: Optional[str] = entry.get("db_gz_url")
     db_gz_sha256: Optional[str] = entry.get("db_gz_sha256")
 
     if not (db_gz_url and db_gz_sha256):
-        # files[patch] 형태 -> base_url + filename
         filename = entry.get("filename")
         sha256 = entry.get("sha256")
         if not (filename and sha256):
@@ -157,7 +213,6 @@ def ensure_patch_db_from_manifest(
         db_gz_url = base + str(filename)
         db_gz_sha256 = str(sha256)
 
-    # 다운로드 + 검증 + 압축해제는 원자적으로 처리
     tmp_root = out_dir_p / ".tmp"
     tmp_root.mkdir(parents=True, exist_ok=True)
 
@@ -166,7 +221,6 @@ def ensure_patch_db_from_manifest(
 
         gz_path = _download_to_tmp(db_gz_url, td_p)
 
-        # sha256 검증 (gz 파일 기준)
         got = _sha256_file(gz_path).lower()
         exp = str(db_gz_sha256).strip().lower()
         if got != exp:
@@ -175,10 +229,12 @@ def ensure_patch_db_from_manifest(
         tmp_db = td_p / f"tmp_{v}_{p}.db"
         _gunzip_file(gz_path, tmp_db)
 
-        # 최종 파일로 이동(원자적 교체)
-        # Windows/리눅스 모두 고려: replace 사용
         tmp_final = out_dir_p / (final_db.name + ".tmp")
         shutil.copy2(tmp_db, tmp_final)
         os.replace(str(tmp_final), str(final_db))
+
+        # 로컬 sha/lastcheck 갱신
+        local_sha_path.write_text(exp + "\n", encoding="utf-8")
+        _touch(lastcheck_path)
 
     return final_db

@@ -25,13 +25,11 @@ import argparse
 import gzip
 import hashlib
 import json
-import os
 import shutil
 import sqlite3
-import sys
 import time
 from pathlib import Path
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List
 
 
 CORE_TABLES = [
@@ -83,17 +81,19 @@ def _copy_indexes(src: sqlite3.Connection, dst: sqlite3.Connection, table: str):
     ).fetchall()
     for (sql,) in rows:
         if sql:
-            dst.execute(sql)
+            try:
+                dst.execute(sql)
+            except Exception:
+                # 이미 있거나 호환 안되면 스킵
+                pass
 
 
 def _copy_rows_by_patch(src: sqlite3.Connection, dst: sqlite3.Connection, table: str, patch: str):
     # patch 컬럼이 있는 테이블만 patch=?
-    # (matches/agg_* / match_tier)
     cols = [r[1] for r in src.execute(f"PRAGMA table_info({table})").fetchall()]
     if "patch" not in cols:
         return
 
-    # 전체 컬럼 순서로 insert
     col_list = ", ".join(cols)
     placeholders = ", ".join(["?"] * len(cols))
 
@@ -106,7 +106,6 @@ def _copy_rows_by_patch(src: sqlite3.Connection, dst: sqlite3.Connection, table:
 
 
 def _copy_matches_filtered(src: sqlite3.Connection, dst: sqlite3.Connection, patch: str) -> List[str]:
-    # matches는 patch 필터 필수
     cols = [r[1] for r in src.execute("PRAGMA table_info(matches)").fetchall()]
     col_list = ", ".join(cols)
     placeholders = ", ".join(["?"] * len(cols))
@@ -116,7 +115,6 @@ def _copy_matches_filtered(src: sqlite3.Connection, dst: sqlite3.Connection, pat
     if rows:
         dst.executemany(f"INSERT INTO matches ({col_list}) VALUES ({placeholders})", rows)
 
-    # match_id 목록
     mid_idx = cols.index("match_id") if "match_id" in cols else 0
     match_ids = [str(r[mid_idx]) for r in rows] if rows else []
     return match_ids
@@ -138,7 +136,6 @@ def _copy_rows_by_match_ids(src: sqlite3.Connection, dst: sqlite3.Connection, ta
     col_list = ", ".join(cols)
     placeholders = ", ".join(["?"] * len(cols))
 
-    # IN 절 너무 커지는 것 방지
     for chunk in _chunks(match_ids, 900):
         qmarks = ", ".join(["?"] * len(chunk))
         cur = src.execute(f"SELECT {col_list} FROM {table} WHERE match_id IN ({qmarks})", tuple(chunk))
@@ -154,7 +151,6 @@ def _vacuum_and_analyze(con: sqlite3.Connection):
         con.execute("VACUUM;")
         con.commit()
     except Exception:
-        # 일부 환경에서 VACUUM이 제한될 수 있어서 무시
         pass
 
 
@@ -170,24 +166,19 @@ def build_patch_db(src_db: Path, out_db: Path, patch: str):
     dst = sqlite3.connect(str(out_db))
 
     try:
-        # 안정 설정
         dst.execute("PRAGMA journal_mode=OFF;")
         dst.execute("PRAGMA synchronous=OFF;")
 
-        # 필요한 테이블만 스키마 복사
         for t in CORE_TABLES:
             if _table_exists(src, t):
                 _copy_table_schema(src, dst, t)
-
         dst.commit()
 
-        # matches 먼저 복사 + match_ids 획득
         match_ids: List[str] = []
         if _table_exists(src, "matches") and _table_exists(dst, "matches"):
             match_ids = _copy_matches_filtered(src, dst, patch)
             dst.commit()
 
-        # participants / match_bans는 match_ids 기반 복사
         if _table_exists(src, "participants") and _table_exists(dst, "participants"):
             _copy_rows_by_match_ids(src, dst, "participants", match_ids)
             dst.commit()
@@ -196,13 +187,11 @@ def build_patch_db(src_db: Path, out_db: Path, patch: str):
             _copy_rows_by_match_ids(src, dst, "match_bans", match_ids)
             dst.commit()
 
-        # agg_* / match_tier는 patch 컬럼 필터
         for t in ["agg_champ_role", "agg_matchup_role", "agg_synergy_role", "match_tier"]:
             if _table_exists(src, t) and _table_exists(dst, t):
                 _copy_rows_by_patch(src, dst, t, patch)
                 dst.commit()
 
-        # 인덱스 복사(있으면)
         for t in CORE_TABLES:
             if _table_exists(src, t) and _table_exists(dst, t):
                 _copy_indexes(src, dst, t)
@@ -210,7 +199,6 @@ def build_patch_db(src_db: Path, out_db: Path, patch: str):
 
         _vacuum_and_analyze(dst)
 
-        # 간단 체크
         row = dst.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='matches'").fetchone()
         if row:
             cnt = dst.execute("SELECT COUNT(1) FROM matches").fetchone()[0]
@@ -242,6 +230,13 @@ def write_text(p: Path, s: str):
     p.write_text(s, encoding="utf-8")
 
 
+def _ensure_clean(p: Path):
+    try:
+        p.unlink()
+    except FileNotFoundError:
+        pass
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", required=True, help="source sqlite db path (e.g. lol_graph_public.db)")
@@ -250,6 +245,9 @@ def main():
     ap.add_argument("--out_dir", default="release_out", help="output folder")
     ap.add_argument("--tag", default="", help="(optional) release tag to build db_gz_url in manifest")
     ap.add_argument("--repo", default="sbandg0619/LOPA", help='(optional) "owner/repo" for db_gz_url')
+
+    # ✅ NEW: alias 생성 옵션
+    ap.add_argument("--no_alias", action="store_true", help="do not create lol_graph_{variant}.db.gz alias")
     args = ap.parse_args()
 
     src_db = Path(args.src).resolve()
@@ -280,32 +278,50 @@ def main():
     gz_bytes = out_gz.stat().st_size
     print(f"[OK] gzip: {out_gz} ({gz_bytes} bytes)")
 
-    # 3) sha256
+    # 3) sha256 (버전 파일)
     gz_sha = _sha256_file(out_gz)
     write_text(out_sha, gz_sha + "\n")
     print(f"[OK] sha256: {gz_sha}")
+
+    # ✅ NEW: alias 파일 생성 (예: lol_graph_public.db.gz)
+    # - 최신 패치 파일과 내용이 동일한 "고정 이름" gzip
+    alias_gz = out_dir / f"lol_graph_{variant}.db.gz"
+    alias_sha = out_dir / f"lol_graph_{variant}.db.gz.sha256"
+    made_alias = False
+
+    if not args.no_alias:
+        _ensure_clean(alias_gz)
+        _ensure_clean(alias_sha)
+        if alias_gz.resolve() != out_gz.resolve():
+            shutil.copy2(out_gz, alias_gz)
+            write_text(alias_sha, gz_sha + "\n")  # 내용 동일 -> sha256 동일
+            made_alias = True
+            print(f"[OK] alias: {alias_gz} (sha256 same)")
+        else:
+            print("[OK] alias skipped (same path)")
 
     # 4) manifest (release_db가 기대하는 키 포함)
     tag = (args.tag or "").strip()
     repo = (args.repo or "").strip()
     db_gz_url = ""
     if tag and repo:
-        # GitHub Release asset direct download url
         db_gz_url = f"https://github.com/{repo}/releases/download/{tag}/{out_gz.name}"
 
     manifest = {
         "schema_version": 2,
         "generated_at": _now_ts(),
         "variant": variant,
+        # ✅ 추가 정보(호환성 깨지지 않음): alias 관련 힌트
+        "default_patch": patch,
+        "default_filename": (f"lol_graph_{variant}.db.gz" if not args.no_alias else out_gz.name),
+        "default_sha256": gz_sha,
         "files": {
             patch: {
                 "patch": patch,
                 "variant": variant,
                 "filename": out_gz.name,
                 "bytes": int(gz_bytes),
-                # ✅ 호환 키(구버전)
                 "sha256": gz_sha,
-                # ✅ NEW: API 자동다운로드가 기대하는 키(있으면 가장 좋음)
                 "db_gz_url": db_gz_url,
                 "db_gz_sha256": gz_sha,
             }
@@ -315,8 +331,10 @@ def main():
     write_text(out_manifest, json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
     print(f"[OK] manifest: {out_manifest}")
 
-    # 5) 원본 .db는 보관(원하면 지워도 됨)
+    # 5) 원본 .db는 보관
     print("[DONE]")
+    if made_alias:
+        print(f"[DONE] alias created: {alias_gz.name}")
 
 
 if __name__ == "__main__":

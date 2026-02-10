@@ -5,10 +5,8 @@ import argparse
 import gzip
 import hashlib
 import json
-import os
 import shutil
 import sqlite3
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -57,7 +55,6 @@ def list_patches(src: sqlite3.Connection) -> List[str]:
         "SELECT DISTINCT patch FROM matches WHERE patch IS NOT NULL AND patch != '' ORDER BY patch"
     ).fetchall()
     patches = [r[0] for r in rows if r and r[0]]
-    # 자연정렬 느낌으로 정렬
     patches.sort(key=lambda x: parse_patch_key(x))
     return patches
 
@@ -76,6 +73,11 @@ def ensure_clean_file(p: Path) -> None:
         p.unlink()
     except FileNotFoundError:
         pass
+
+
+def write_sha256_simple(digest: str, sha_path: Path) -> None:
+    # 기존 스크립트와 동일 포맷: digest만 한 줄
+    sha_path.write_text(digest + "\n", encoding="utf-8")
 
 
 # =========================
@@ -133,11 +135,7 @@ def create_slim_schema(dst: sqlite3.Connection, *, has_synergy: bool) -> None:
 
     # optional: agg_synergy_role (있으면 포함)
     if has_synergy:
-        # 컬럼명이 프로젝트별로 다를 수 있어서, "원본 스키마 그대로 복제"가 정답인데
-        # 여기서는 흔히 쓰는 컬럼 세트를 먼저 만들고,
-        # 실제 복사는 INSERT...SELECT 시 원본 컬럼에 맞게 동적으로 처리할 수도 있지만
-        # 지금 단계에서는 "원본과 동일한 컬럼"을 그대로 복제하는 방식이 제일 안전함.
-        # -> 그래서 테이블 생성은 '원본 CREATE SQL'로 복제한다(아래 copy_table_create_sql에서 처리)
+        # 컬럼 변형 가능성이 있어 원본 CREATE SQL 복제 방식을 사용
         pass
 
     dst.commit()
@@ -232,7 +230,6 @@ def copy_patch_data(
 
     # agg_synergy_role (있으면 patch 필터)
     if include_synergy and table_exists(src, "agg_synergy_role") and table_exists(dst, "agg_synergy_role"):
-        # 원본 컬럼을 그대로 가져와서 동일 컬럼 insert
         cols = [r[1] for r in src.execute("PRAGMA table_info(agg_synergy_role)").fetchall()]
         if cols:
             col_sql = ", ".join(cols)
@@ -291,6 +288,15 @@ def main():
         help="optional: if set, asset url = url_prefix + filename_gz (e.g. https://.../releases/download/<tag>/)",
     )
     ap.add_argument("--include_synergy_if_exists", default="1", help="1/0 (default 1)")
+
+    # NEW: alias 생성 옵션
+    ap.add_argument("--no_alias", action="store_true", help="do not create lol_graph_public.db.gz alias")
+    ap.add_argument(
+        "--alias_patch",
+        default="",
+        help="which patch to use for alias (default: manifest/latest_patch if built, else latest built patch)",
+    )
+
     args = ap.parse_args()
 
     src_db = Path(args.src_db).resolve()
@@ -324,6 +330,9 @@ def main():
 
         detected_latest = latest_patch_from_matches(src) or (patches_all[-1] if patches_all else "")
         latest_patch = args.latest_patch.strip() or str(detected_latest or patches[-1])
+
+        # 실제로 빌드한 패치들 중 최신(안전장치)
+        latest_built_patch = max(patches, key=lambda x: parse_patch_key(x)) if patches else latest_patch
 
         has_synergy = include_synergy and table_exists(src, "agg_synergy_role")
 
@@ -371,7 +380,7 @@ def main():
             # gzip + sha
             gzip_compress(db_path, gz_path)
             digest = sha256_file(gz_path)
-            sha_path.write_text(digest + "\n", encoding="utf-8")
+            write_sha256_simple(digest, sha_path)
 
             # url
             url_prefix = args.url_prefix.strip()
@@ -389,8 +398,35 @@ def main():
 
             print(f"[OK] patch={patch} db={filename_db} gz={filename_gz} sha256={digest[:12]}... stats={stats}")
 
+        # manifest
         manifest = build_manifest(latest_patch=latest_patch, assets=assets)
         (out_dir / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        # NEW: alias 생성 (lol_graph_public.db.gz)
+        # - Render 부팅 자동 다운로드가 이 파일명을 기대하는 경우를 위한 "고정 이름"
+        if not args.no_alias:
+            alias_patch = args.alias_patch.strip()
+            if not alias_patch:
+                alias_patch = latest_patch if latest_patch in assets else latest_built_patch
+
+            if alias_patch not in assets:
+                print(f"[WARN] alias_patch '{alias_patch}' not built; fallback to latest_built_patch '{latest_built_patch}'")
+                alias_patch = latest_built_patch
+
+            src_gz = out_dir / assets[alias_patch]["filename_gz"]
+            if not src_gz.exists():
+                print(f"[WARN] alias source missing: {src_gz} (skip alias)")
+            else:
+                alias_gz = out_dir / "lol_graph_public.db.gz"
+                alias_sha = out_dir / "lol_graph_public.db.gz.sha256"
+                ensure_clean_file(alias_gz)
+                ensure_clean_file(alias_sha)
+
+                shutil.copy2(src_gz, alias_gz)
+                alias_digest = assets[alias_patch]["sha256"]  # 동일 파일 복사이므로 digest 동일
+                write_sha256_simple(alias_digest, alias_sha)
+
+                print(f"[ALIAS] patch={alias_patch} -> {alias_gz.name} (sha256={alias_digest[:12]}...)")
 
         print("\n[DONE]")
         print(f"- out_dir: {out_dir}")

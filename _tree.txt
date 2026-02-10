@@ -41,6 +41,7 @@ C:.
 |   recommend)
 |   recommender.py
 |   release_db.py
+|   render_start.sh
 |   requirements.txt
 |   riot_api.py
 |   running
@@ -59,6 +60,8 @@ C:.
 |   _grep_enemy_role.txt
 |   _tree.txt
 |   
++---$DB_DIR
++----p
 +---db
 +---legal
 |       contact_en.md
@@ -113,6 +116,9 @@ C:.
 |       pipeline_personal_20260209_142212_40392.log
 |       pipeline_personal_20260209_142257_81725.log
 |       pipeline_personal_20260209_142731_92855.log
+|       pipeline_personal_20260209_150844_44714.log
+|       pipeline_personal_20260209_151003_88997.log
+|       pipeline_personal_20260209_151050_76956.log
 |       pipeline_personal_2488.log
 |       pipeline_personal_5410.log
 |       pipeline_personal_891.log
@@ -122,6 +128,7 @@ C:.
 |       _latest_patch.txt
 |       
 +---release_out
+|       lol_graph_public.db.gz
 |       lol_graph_public_16.2.db
 |       lol_graph_public_16.2.db.gz
 |       lol_graph_public_16.2.db.gz.sha256
